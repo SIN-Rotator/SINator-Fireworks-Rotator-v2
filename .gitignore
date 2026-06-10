@@ -1,0 +1,44 @@
+# Environment
+.env
+*.log
+logs/
+.env.local
+
+# Data (secrets - never commit)
+data/
+*.json
+!config.example.json
+
+# Chrome profiles (huge, temporary)
+/tmp/sinator-chrome-*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Deprecated / historical (kept on disk, not tracked)
+deprecated/
+plans/
+debug/
+
+# Tools
+.gitnexus
