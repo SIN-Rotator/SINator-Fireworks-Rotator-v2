@@ -1,5 +1,15 @@
 # AGENTS.md — SINator Fireworks AI Rotator V19.3 (2026-06-02) — **GMX DELETE FIXED**
 
+> ## ⚠️ STATUS: STANDALONE-FORK, NICHT AKTIV ENTWICKELT
+> 
+> **Dieses Repo ist eingefroren auf v19.3-gmx-delete-fixed** (10. Juni 2026). Es wurde aus dem Haupt-Repo [SINator-FireworksAI](https://github.com/SIN-Rotator/SINator-FireworksAI) extrahiert, um den funktionierenden Stand als ewiges Backup zu verewigen.
+> 
+> **Für aktive Entwicklung benutze das Haupt-Repo** (Tag `v20.0-fireworks-working` markiert den dortigen Working-Stand mit den 2 chirurgischen Fixes aus diesem Repo portiert).
+> 
+> **Immortal Tags in diesem Repo:**
+> - `v19.3-gmx-delete-fixed` — Letzter originaler v19.3-Branch-Commit
+> - `v19.3-gmx-delete-fixed-working` — **VERIFIED WORKING** (164.6s E2E-Test bestanden)
+
 ## ✅ COMPLETE E2E FLOW — VERIFIED 2026-06-02
 
 ```bash
