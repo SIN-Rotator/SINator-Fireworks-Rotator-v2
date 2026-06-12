@@ -10,6 +10,20 @@
 > - `v19.3-gmx-delete-fixed` — Letzter originaler v19.3-Branch-Commit
 > - `v19.3-gmx-delete-fixed-working` — **VERIFIED WORKING** (164.6s E2E-Test bestanden)
 
+## 📝 CHANGELOG (2026-06-12)
+
+**GMX-Account-Switch: `delqhi@gmx.de` → `nemotronv3@gmx.de`**
+
+Der alte `delqhi@gmx.de` Account wurde von Fireworks gebannt (monthly spending limit
+erreicht nach ~245 Account-Generationen × $6 Starter-Credits).
+
+Neuer Account: `nemotronv3@gmx.de` mit gleichem Password `ZOE.jerry2024`.
+
+- `agent_toolbox/core/gmx_service.py` Zeile 766/769: Email-Filter angepasst
+- Shared config `/Users/jeremy/dev/data/config.json` und `data/config.json` aktualisiert
+- Erste Rotation mit neuem Account (12.06.2026 15:44-15:51): API Key `fw_BoFN2D1vpJY7RiEK6uMVrQ` ✅
+- Zweite Rotation (12.06.2026 16:48-16:51): API Key `fw_Gp6vwvXGvau6VFaeUGy85Z` ✅
+
 ## ✅ COMPLETE E2E FLOW — VERIFIED 2026-06-02
 
 ```bash
