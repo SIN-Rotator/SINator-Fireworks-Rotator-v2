@@ -326,7 +326,26 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     await browser_navigate("https://app.fireworks.ai/login")
     await asyncio.sleep(2)
 
-    await browser_console("""document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-modal,[class*="cky-"]').forEach(e => e.remove()); document.body.style.overflow = 'visible';""")
+    # Remove cookie consent banner — Fireworks switched from cky-* to OneTrust-style
+    # Try clicking "Reject All" first (cleanest), then nuke all known consent selectors
+    try:
+        await browser_click_by_text("Reject All", role="button")
+        await asyncio.sleep(1)
+    except Exception:
+        pass
+    await browser_console("""(() => {
+        // Old cky-* system
+        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-modal,.cky-preference-center,[class*="cky-"]').forEach(e => e.remove());
+        // New OneTrust / consent systems
+        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
+        // Generic consent containers
+        document.querySelectorAll('[class*="consent"],[id*="consent"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
+        // Iframe-based banners
+        document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
+        // Restore scroll
+        document.body.style.overflow = 'visible';
+        document.documentElement.style.overflow = 'visible';
+    })()""")
     await asyncio.sleep(1)
 
     for attempt in range(3):
