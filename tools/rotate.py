@@ -207,8 +207,11 @@ async def main():
             logger.info("Closing Bot Chrome (Fireworks)")
             await cleanup_bot(fw_mgr)
         if gmx_browser:
-            logger.info("Disconnecting from User Chrome (GMX)")
-            await gmx_browser.close()
+            if args.cdp_port:
+                logger.info("Disconnecting from User Chrome (CDP — NOT closing)")
+            else:
+                logger.info("Closing User Chrome (GMX)")
+                await gmx_browser.close()
         await p.stop()
         logger.info(f"\nROTATION COMPLETE - {elapsed:.1f}s")
 
