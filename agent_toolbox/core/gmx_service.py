@@ -428,38 +428,25 @@ class GmxService:
             if "consent" in url:
                 logger.info("Cookie consent page detected, accepting")
                 try:
-                    # Consent buttons are in cross-origin iframes (dl.gmx.net/permission/...)
-                    consent_clicked = False
-                    for frame in page.frames:
-                        if frame == page.main_frame:
-                            continue
-                        try:
-                            for selector in ['button:has-text("Akzeptieren und weiter")', 
-                                           'button:has-text("Alle akzeptieren")', 
-                                           'button:has-text("Zustimmen")',
-                                           'button:has-text("Akzeptieren")']:
-                                btn = frame.locator(selector).first
-                                if await btn.is_visible(timeout=2000):
-                                    await btn.click()
-                                    logger.info(f"Clicked consent in iframe: {selector}")
-                                    await asyncio.sleep(5)
-                                    consent_clicked = True
-                                    break
-                        except Exception:
-                            pass
-                        if consent_clicked:
+                    # Click "Alle akzeptieren" or "Zustimmen" or similar
+                    for selector in ['button:has-text("Alle akzeptieren")', 'button:has-text("Zustimmen")', 
+                                    'button:has-text("Akzeptieren")', 'button:has-text("OK")',
+                                    'button[data-testid="uc-accept-all-button"]']:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=2000):
+                            await btn.click()
+                            logger.info(f"Clicked consent: {selector}")
+                            await asyncio.sleep(3)
                             break
-                    if not consent_clicked:
-                        logger.warning("Consent button not found in any iframe")
                 except Exception as e:
                     logger.warning(f"Consent handling failed: {e}")
                 url = page.url
                 logger.info(f"After consent: {url[:80]}")
-                # After consent, navigate to navigator.gmx.net/mail to trigger login
-                if "consent" in url or "www.gmx.net" in url:
-                    logger.info("Navigating to navigator.gmx.net/mail after consent")
-                    await page.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
-                    await asyncio.sleep(5)
+                # After consent, we're on consent-management page — navigate to real www.gmx.net
+                if "consent" in url:
+                    logger.info("Navigating to www.gmx.net after consent")
+                    await page.goto("https://www.gmx.net/", wait_until="domcontentloaded")
+                    await asyncio.sleep(3)
                     url = page.url
                     logger.info(f"After consent redirect: {url[:80]}")
             
@@ -583,8 +570,15 @@ class GmxService:
                             logger.info("Clicked Weiter")
                             await asyncio.sleep(4)
                         
-                        # Step 2: password (SPA shows it after Weiter — do NOT navigate away)
-                        await asyncio.sleep(4)
+                        # If prompt=none, replace with prompt=login via JS
+                        if "prompt=none" in page.url:
+                            logger.info("prompt=none detected — replacing with prompt=login")
+                            await page.evaluate("""
+                                const u = new URL(window.location.href);
+                                u.searchParams.set('prompt', 'login');
+                                window.history.replaceState({}, '', u.toString());
+                            """)
+                            await asyncio.sleep(1)
                         
                         # Step 2: password
                         password_input = page.locator('input[type="password"]').first
