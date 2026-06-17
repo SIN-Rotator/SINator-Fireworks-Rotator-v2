@@ -476,143 +476,56 @@ async def _playwright_onboarding() -> None:
     except Exception:
         pass
 
-    # ── Step 2: Fill text fields — robust multi-strategy (V19.22) ────────────
+    # ── Step 2: Fill text fields via browser_type (delay=30ms triggers React) ─
     import random, string
 
-    # Helper: set value via native setter + dispatch React events
-    async def _set_input_value(selector, value, field_name="field"):
-        """Try browser_type first, then JS native setter as fallback."""
-        # Strategy 1: browser_type (simulates real typing)
-        try:
-            await browser_type(selector, value)
-            await asyncio.sleep(0.3)
-            # Verify the value was set
-            check = await browser_console(f"""(() => {{
-                var el = document.querySelector({selector!r});
-                return el ? el.value : 'NOT_FOUND';
-            }})()""")
-            if (check.get("result") or "") == value:
-                logger.info(f"{field_name} filled via browser_type: '{value}'")
-                return True
-        except Exception as e:
-            logger.warning(f"browser_type {field_name} failed: {e}")
-
-        # Strategy 2: JS native setter (React-compatible)
-        try:
-            await browser_console(f"""(() => {{
-                var el = document.querySelector({selector!r});
-                if (!el) return 'NOT_FOUND';
-                var nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value').set;
-                nativeInputValueSetter.call(el, {value!r});
-                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                return el.value;
-            }})()""")
-            await asyncio.sleep(0.3)
-            logger.info(f"{field_name} filled via JS setter: '{value}'")
-            return True
-        except Exception as e:
-            logger.warning(f"JS setter {field_name} failed: {e}")
-            return False
-
-    # Log ALL visible text inputs on the page for debugging
-    diag_inputs = await browser_console("""(() => {
-        var inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-        var result = [];
-        for (var i=0; i<inputs.length; i++) {
-            result.push({
-                name: inputs[i].name || '',
-                id: inputs[i].id || '',
-                type: inputs[i].type || '',
-                placeholder: inputs[i].placeholder || '',
-                value: (inputs[i].value || '').slice(0, 20),
-                visible: inputs[i].offsetParent !== null
-            });
-        }
-        return result;
-    })()""")
-    logger.info(f"DIAG visible text inputs: {diag_inputs.get('result', [])}")
-
-    # Account ID — DO NOT TOUCH if pre-filled
-    aid_filled = False
-    for sel in ['input[name="accountId"]', 'input[name="account_id"]', 'input[id="accountId"]', 'input[placeholder*="account"]']:
-        check = await browser_console(f"""document.querySelector({sel!r}) ? 'YES' : 'NO'""")
-        if check.get("result") == "YES":
-            current_aid = await browser_console(f"""(() => {{
-                var inp = document.querySelector({sel!r});
-                return inp ? (inp.value || '') : '';
-            }})()""")
-            current_aid = (current_aid.get("result") or "").strip()
-            if current_aid:
-                logger.info(f"Account ID pre-filled: '{current_aid}' (not overwriting)")
-                aid_filled = True
-                break
-            else:
-                aid = "sin" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-                await _set_input_value(sel, aid, "Account ID")
-                aid_filled = True
-                break
-
-    # First name — try multiple selectors
-    fn_filled = False
-    for sel in ['input[name="firstName"]', 'input[name="first_name"]', 'input[name="first"]',
-                'input[id="firstName"]', 'input[id="first_name"]', 'input[id="first"]',
-                'input[placeholder*="First"]', 'input[placeholder*="first"]',
-                'input[autocomplete="given-name"]']:
-        check = await browser_console(f"""document.querySelector({sel!r}) ? 'YES' : 'NO'""")
-        if check.get("result") == "YES":
-            if await _set_input_value(sel, "Super", "First name"):
-                fn_filled = True
-                break
-    if not fn_filled:
-        logger.warning("First name field NOT found — trying generic visible text input #0")
-        # Last resort: fill first visible text input
-        await browser_console("""(() => {
-            var inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-            for (var i=0; i<inputs.length; i++) {
-                if (inputs[i].offsetParent !== null && !inputs[i].value) {
-                    var nativeSetter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value').set;
-                    nativeSetter.call(inputs[i], 'Super');
-                    inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
-                    inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
-                    return 'filled input#' + i;
-                }
-            }
-            return 'no empty input found';
+    # Account ID — DO NOT TOUCH (Fireworks pre-fills it with a unique suggestion,
+    # editing it triggers a "max 20 chars" validation error)
+    has_aid = int((await browser_console("document.querySelectorAll('input[name=accountId]').length"))["result"])
+    if has_aid > 0:
+        # Just verify the pre-filled value is there; DO NOT overwrite
+        current_aid = await browser_console("""(() => {
+            var inp = document.querySelector('input[name="accountId"]');
+            return inp ? (inp.value || '') : '';
         })()""")
+        current_aid = (current_aid.get("result") or "").strip()
+        if current_aid:
+            logger.info(f"Account ID pre-filled by Fireworks: '{current_aid}' (using as-is, NOT overwriting)")
+        else:
+            # Field is empty — fill with a safe 11-char value
+            aid = "sin" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            try:
+                await browser_type('input[name="accountId"]', aid)
+            except Exception as e:
+                logger.warning(f"browser_type accountId failed: {e}")
+            await asyncio.sleep(0.3)
+            logger.info(f"Account ID filled: {aid}")
 
-    # Last name — try multiple selectors
-    ln_filled = False
-    for sel in ['input[name="lastName"]', 'input[name="last_name"]', 'input[name="last"]',
-                'input[id="lastName"]', 'input[id="last_name"]', 'input[id="last"]',
-                'input[placeholder*="Last"]', 'input[placeholder*="last"]',
-                'input[autocomplete="family-name"]']:
-        check = await browser_console(f"""document.querySelector({sel!r}) ? 'YES' : 'NO'""")
-        if check.get("result") == "YES":
-            if await _set_input_value(sel, "Cheetah", "Last name"):
-                ln_filled = True
-                break
-    if not ln_filled:
-        logger.warning("Last name field NOT found — trying generic visible text input #1")
-        await browser_console("""(() => {
-            var inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-            var count = 0;
-            for (var i=0; i<inputs.length; i++) {
-                if (inputs[i].offsetParent !== null && !inputs[i].value) {
-                    if (count === 0) { count++; continue; } // skip first (already filled as firstName)
-                    var nativeSetter = Object.getOwnPropertyDescriptor(
-                        window.HTMLInputElement.prototype, 'value').set;
-                    nativeSetter.call(inputs[i], 'Cheetah');
-                    inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
-                    inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
-                    return 'filled input#' + i;
-                }
-            }
-            return 'no second empty input found';
-        })()""")
+    # First name
+    has_fn = int((await browser_console("document.querySelectorAll('input[name=firstName]').length || document.querySelectorAll('input[name=first]').length"))["result"])
+    if has_fn > 0:
+        try:
+            await browser_type('input[name="firstName"]', "Super")
+        except Exception:
+            try:
+                await browser_type('input[name="first"]', "Super")
+            except Exception as e:
+                logger.warning(f"browser_type firstName failed: {e}")
+        await asyncio.sleep(0.3)
+        logger.info("First name filled")
+
+    # Last name
+    has_ln = int((await browser_console("document.querySelectorAll('input[name=lastName]').length || document.querySelectorAll('input[name=last]').length"))["result"])
+    if has_ln > 0:
+        try:
+            await browser_type('input[name="lastName"]', "Cheetah")
+        except Exception:
+            try:
+                await browser_type('input[name="last"]', "Cheetah")
+            except Exception as e:
+                logger.warning(f"browser_type lastName failed: {e}")
+        await asyncio.sleep(0.3)
+        logger.info("Last name filled")
 
     # ── Step 3: 4-strategy checkbox clicker (V18.4 fallback chain) ──────────
     async def _click_checkbox_any_strategy(match_text: str) -> bool:
