@@ -520,31 +520,67 @@ async def _playwright_onboarding() -> None:
             await asyncio.sleep(0.3)
             logger.info(f"Account ID filled: {aid}")
 
-    # First name
-    has_fn = int((await browser_console("document.querySelectorAll('input[name=firstName]').length || document.querySelectorAll('input[name=first]').length"))["result"])
-    if has_fn > 0:
+    # First name — try multiple selectors (name, placeholder, label proximity)
+    fn_filled = False
+    for selector in ['input[name="firstName"]', 'input[name="first"]', 'input[placeholder*="First"]', 'input[placeholder*="first"]']:
         try:
-            await browser_type('input[name="firstName"]', "Super")
+            count = int((await browser_console(f"document.querySelectorAll('{selector}').length"))["result"])
+            if count > 0:
+                await browser_type(selector, "Super")
+                fn_filled = True
+                logger.info(f"First name filled via {selector}")
+                break
         except Exception:
-            try:
-                await browser_type('input[name="first"]', "Super")
-            except Exception as e:
-                logger.warning(f"browser_type firstName failed: {e}")
-        await asyncio.sleep(0.3)
-        logger.info("First name filled")
+            continue
+    if not fn_filled:
+        # Fallback: find input next to "First Name" label
+        try:
+            await browser_console("""(() => {
+                var labels = document.querySelectorAll('label');
+                for (var i=0; i<labels.length; i++) {
+                    if (labels[i].textContent.trim() === 'First Name') {
+                        var input = labels[i].querySelector('input') || labels[i].nextElementSibling?.querySelector('input');
+                        if (input) { input.focus(); input.value = 'Super'; input.dispatchEvent(new Event('input', {bubbles:true})); return 'ok'; }
+                    }
+                }
+                return 'not_found';
+            })()""")
+            fn_filled = True
+            logger.info("First name filled via label lookup")
+        except Exception as e:
+            logger.warning(f"First name all strategies failed: {e}")
+    await asyncio.sleep(0.3)
 
-    # Last name
-    has_ln = int((await browser_console("document.querySelectorAll('input[name=lastName]').length || document.querySelectorAll('input[name=last]').length"))["result"])
-    if has_ln > 0:
+    # Last name — try multiple selectors
+    ln_filled = False
+    for selector in ['input[name="lastName"]', 'input[name="last"]', 'input[placeholder*="Last"]', 'input[placeholder*="last"]']:
         try:
-            await browser_type('input[name="lastName"]', "Cheetah")
+            count = int((await browser_console(f"document.querySelectorAll('{selector}').length"))["result"])
+            if count > 0:
+                await browser_type(selector, "Cheetah")
+                ln_filled = True
+                logger.info(f"Last name filled via {selector}")
+                break
         except Exception:
-            try:
-                await browser_type('input[name="last"]', "Cheetah")
-            except Exception as e:
-                logger.warning(f"browser_type lastName failed: {e}")
-        await asyncio.sleep(0.3)
-        logger.info("Last name filled")
+            continue
+    if not ln_filled:
+        # Fallback: find input next to "Last Name" label
+        try:
+            await browser_console("""(() => {
+                var labels = document.querySelectorAll('label');
+                for (var i=0; i<labels.length; i++) {
+                    if (labels[i].textContent.trim() === 'Last Name') {
+                        var input = labels[i].querySelector('input') || labels[i].nextElementSibling?.querySelector('input');
+                        if (input) { input.focus(); input.value = 'Cheetah'; input.dispatchEvent(new Event('input', {bubbles:true})); return 'ok'; }
+                    }
+                }
+                return 'not_found';
+            })()""")
+            ln_filled = True
+            logger.info("Last name filled via label lookup")
+        except Exception as e:
+            logger.warning(f"Last name all strategies failed: {e}")
+    await asyncio.sleep(0.3)
 
     # ── Step 3: 4-strategy checkbox clicker (V18.4 fallback chain) ──────────
     async def _click_checkbox_any_strategy(match_text: str) -> bool:
@@ -749,15 +785,63 @@ async def _playwright_onboarding() -> None:
         await asyncio.sleep(0.2)
 
     # ── Step 6: Submit (Page 2 → home/settings) ─────────────────────────────
+    # DIAG: log all buttons on Page 2
     try:
-        await browser_click_by_text("Submit", role="button")
+        btn_diag = await browser_console("""(() => {
+            var b = document.querySelectorAll('button');
+            var result = [];
+            for (var i=0; i<b.length; i++) {
+                result.push({
+                    text: (b[i].textContent || '').trim().substring(0, 50),
+                    disabled: b[i].disabled,
+                    type: b[i].type,
+                    cls: (b[i].className || '').substring(0, 60)
+                });
+            }
+            return result;
+        })()""")
+        logger.info(f"Page 2 buttons: {btn_diag}")
+    except Exception as e:
+        logger.warning(f"Page 2 button diag failed: {e}")
+
+    # DIAG: screenshot Page 2
+    try:
+        from sin_browser_tools.core import manager
+        os.makedirs("/tmp/onboarding-diag", exist_ok=True)
+        await manager.page.screenshot(path="/tmp/onboarding-diag/page2-before-submit.png")
     except Exception:
-        for txt in ("Get $5", "Finish", "Continue"):
-            try:
-                await browser_click_by_text(txt, role="button")
-                break
-            except Exception:
-                continue
+        pass
+
+    # Try multiple button texts for Page 2 submission
+    # Priority: Skip (bypass use cases) > exact button text > partial match
+    submit_clicked = False
+    for txt in ("Skip", "Submit to get $5 Credits", "Submit", "Finish setup", "Complete profile", "Get started", "Get $5", "Finish", "Continue", "Complete onboarding"):
+        try:
+            await browser_click_by_text(txt, role="button")
+            logger.info(f"Page 2 submit clicked via '{txt}'")
+            submit_clicked = True
+            break
+        except Exception:
+            continue
+
+    if not submit_clicked:
+        logger.warning("No Page 2 submit button found, trying JS click on last button")
+        try:
+            await browser_console("""(() => {
+                var b = document.querySelectorAll('button');
+                for (var i=b.length-1; i>=0; i--) {
+                    var t = (b[i].textContent || '').trim().toLowerCase();
+                    if (t && t !== 'previous slide' && t !== 'next slide' && !b[i].disabled) {
+                        b[i].click();
+                        return b[i].textContent.trim();
+                    }
+                }
+                return 'no_button';
+            })()""")
+            logger.info("JS clicked last enabled button")
+        except Exception as e:
+            logger.warning(f"JS button click failed: {e}")
+
     await asyncio.sleep(2)
 
     # Fallback: still on /onboarding → form.requestSubmit() + Enter
