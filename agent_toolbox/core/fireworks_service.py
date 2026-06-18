@@ -143,6 +143,47 @@ async def launch() -> Dict[str, Any]:
             parameters.name === 'notifications'
                 ? Promise.resolve({ state: Notification.permission })
                 : originalQuery(parameters);
+        // ── CookieYes consent PREVENTION ──
+        // Set consent in localStorage BEFORE any page JS runs, so the banner
+        // never appears. CookieYes checks localStorage on init and skips the
+        // banner if consent is already given.
+        try {
+            const consent = {
+                necessary: true, functional: true, analytics: false,
+                performance: false, advertisement: false, timestamp: Date.now()
+            };
+            localStorage.setItem('cookieyes-consent', JSON.stringify(consent));
+            localStorage.setItem('cky-consent', 'yes:' + btoa(JSON.stringify(consent)));
+            // Also set the newer _cookieyes cookie name
+            document.cookie = 'cookieyes-consent=yes; path=/; max-age=31536000; SameSite=Lax';
+        } catch(e) {}
+        // Inject CSS to permanently hide all known consent banner selectors
+        const style = document.createElement('style');
+        style.textContent = `
+            .cky-overlay, .cky-consent-container, .cky-banner-container, .cky-modal,
+            .cky-preference-center, .cky-notice, .cky-notice-group, [class*="cky-"],
+            #onetrust-banner-sdk, #onetrust-pc-sdk, #onetrust-consent-sdk,
+            [class*="onetrust"], [id*="onetrust"],
+            [class*="cookie-banner"], [id*="cookie-banner"],
+            [class*="consent-banner"], [id*="consent-banner"],
+            #consent-banner, .consent-banner {
+                display: none !important;
+                visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+                z-index: -9999 !important;
+            }
+            body { overflow: visible !important; }
+            html { overflow: visible !important; }
+        `;
+        try { document.head.appendChild(style); } catch(e) {}
+        // Auto-remove cky elements if they somehow appear (MutationObserver)
+        const observer = new MutationObserver(() => {
+            document.querySelectorAll('[class*="cky-"],[class*="onetrust"],[id*="onetrust"],[class*="consent-banner"],[id*="consent-banner"]').forEach(e => {
+                e.remove();
+            });
+        });
+        try { observer.observe(document.documentElement, {childList: true, subtree: true}); } catch(e) {}
     """)
 
     handle = _BrowserHandle(page, context, browser, pw)
@@ -169,6 +210,41 @@ async def cleanup_bot(browser_manager=None) -> None:
 
 # ── Signup ──────────────────────────────────────────────────────────────────
 
+async def _dismiss_cookie_consent() -> None:
+    """Central cookie consent banner dismissal — call after EVERY Fireworks navigation.
+    
+    The init_script in launch() sets localStorage consent + CSS hiding + MutationObserver
+    to PREVENT the banner. This function is the reactive fallback that removes any
+    banner that slipped through (e.g. if CookieYes ignores localStorage).
+    """
+    from sin_browser_tools.tools.interaction import browser_click_by_text
+    from sin_browser_tools.tools.extraction import browser_console
+
+    # 1. Try clicking "Reject All" (cleanest — sets CookieYes consent properly)
+    try:
+        await browser_click_by_text("Reject All", role="button")
+        await asyncio.sleep(0.5)
+        logger.info("Cookie banner: 'Reject All' clicked")
+    except Exception:
+        pass
+
+    # 2. Nuke all known consent DOM elements via JS
+    await browser_console("""(() => {
+        // CookieYes (cky-*)
+        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
+        // OneTrust
+        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
+        // Generic consent containers
+        document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
+        // Iframe-based banners
+        document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
+        // Restore scroll
+        document.body.style.overflow = 'visible';
+        document.documentElement.style.overflow = 'visible';
+    })()""")
+    await asyncio.sleep(0.3)
+
+
 async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]:
     """Create a new Fireworks account with the given email and password.
 
@@ -193,26 +269,8 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
     await asyncio.sleep(3)
     logger.info(f"Signup page loaded")
 
-    # Remove cookie consent banner — comprehensive dismissal (matches login_fireworks)
-    try:
-        await browser_click_by_text("Reject All", role="button")
-        await asyncio.sleep(1)
-    except Exception:
-        pass
-    await browser_console("""(() => {
-        // Old cky-* system
-        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-modal,.cky-preference-center,[class*="cky-"]').forEach(e => e.remove());
-        // New OneTrust / consent systems
-        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
-        // Generic consent containers
-        document.querySelectorAll('[class*="consent"],[id*="consent"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
-        // Iframe-based banners
-        document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
-        // Restore scroll
-        document.body.style.overflow = 'visible';
-        document.documentElement.style.overflow = 'visible';
-    })()""")
-    await asyncio.sleep(1)
+    # Dismiss cookie consent banner (preventive init_script + reactive fallback)
+    await _dismiss_cookie_consent()
 
     r = await browser_fill('input[name="email"]', email)
     if r.get("status") != "typed":
@@ -245,15 +303,8 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
     await browser_fill('input[name="confirmPassword"]', password)
     steps.append("passwords_filled")
 
-    # Remove cookie consent banner right before click — it may reappear
-    await browser_console("""(() => {
-        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-modal,.cky-preference-center,[class*="cky-"]').forEach(e => e.remove());
-        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
-        document.querySelectorAll('[class*="consent"],[id*="consent"],[class*="cookie-banner"],[id*="cookie-banner"]').forEach(e => e.remove());
-        document.body.style.overflow = 'visible';
-        document.documentElement.style.overflow = 'visible';
-    })()""")
-    await asyncio.sleep(0.5)
+    # Dismiss cookie consent again right before click (banner may reappear on SPA transitions)
+    await _dismiss_cookie_consent()
 
     # Try normal click first, fall back to JS click if consent banner intercepts
     try:
@@ -303,6 +354,8 @@ async def verify_account(verify_url: str, **kwargs) -> bool:
     try:
         await browser_navigate(verify_url)
         await asyncio.sleep(2)
+        # Dismiss cookie consent banner on verify redirect page
+        await _dismiss_cookie_consent()
         url = (await browser_get_url())["url"]
         logger.info(f"Verify URL opened: {url[:80]}")
         # DIAG: screenshot after verify URL load
@@ -362,27 +415,8 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     await browser_navigate("https://app.fireworks.ai/login")
     await asyncio.sleep(2)
 
-    # Remove cookie consent banner — Fireworks switched from cky-* to OneTrust-style
-    # Try clicking "Reject All" first (cleanest), then nuke all known consent selectors
-    try:
-        await browser_click_by_text("Reject All", role="button")
-        await asyncio.sleep(1)
-    except Exception:
-        pass
-    await browser_console("""(() => {
-        // Old cky-* system
-        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-modal,.cky-preference-center,[class*="cky-"]').forEach(e => e.remove());
-        // New OneTrust / consent systems
-        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
-        // Generic consent containers
-        document.querySelectorAll('[class*="consent"],[id*="consent"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
-        // Iframe-based banners
-        document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
-        // Restore scroll
-        document.body.style.overflow = 'visible';
-        document.documentElement.style.overflow = 'visible';
-    })()""")
-    await asyncio.sleep(1)
+    # Dismiss cookie consent banner (preventive init_script + reactive fallback)
+    await _dismiss_cookie_consent()
 
     for attempt in range(3):
         try:
@@ -489,39 +523,10 @@ async def _playwright_onboarding() -> None:
     from sin_browser_tools.tools.extraction import browser_console
 
     import os
-    # ── Step 1: AGGRESSIVELY remove cookie banner ──────────────────────────
-    # The banner has a "Customise" mode that shows hundreds of partner toggles
-    # and completely covers the form. We must nuke it before doing anything.
-    # First, scroll to top so all "Reject All" buttons are potentially visible.
-    await browser_console("""(() => {
-        // Scroll to top so the top Reject All button is in view
-        window.scrollTo(0, 0);
-    })()""")
-    await asyncio.sleep(0.3)
-
-    # Try clicking Reject All (top-of-page button, which is visible)
-    try:
-        await browser_click_by_text("Reject All", role="button")
-        await asyncio.sleep(0.5)
-        logger.info("Cookie banner rejected via 'Reject All' click")
-    except Exception as e:
-        logger.warning(f"Reject All click failed: {e}")
-
-    # AGGRESSIVE: remove all consent elements via JS (catches anything that wasn't removed)
-    await browser_console("""(() => {
-        // Old cky-* system
-        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-modal,.cky-preference-center,[class*="cky-"]').forEach(e => e.remove());
-        // New OneTrust / consent systems
-        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
-        // Generic consent containers
-        document.querySelectorAll('[class*="consent"],[id*="consent"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
-        // Iframe-based banners
-        document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
-        // Restore body scroll
-        document.body.style.overflow = 'visible';
-        document.documentElement.style.overflow = 'visible';
-    })()""")
-    await asyncio.sleep(0.5)
+    # ── Step 1: Dismiss cookie banner ─────────────────────────────────────
+    # The init_script in launch() already prevents it, but call the reactive
+    # fallback in case CookieYes ignored localStorage.
+    await _dismiss_cookie_consent()
 
     # Verify cky-* elements are gone
     cky_count = (await browser_console("document.querySelectorAll('[class*=cky]').length") or {}).get("result", "0")
@@ -971,8 +976,8 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
 
     logger.info(f"API Keys page loaded: {url[:80]}")
 
-    await browser_console("""document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-modal,[class*="cky-"]').forEach(e => e.remove()); document.body.style.overflow = 'visible';""")
-    await asyncio.sleep(1)
+    # Dismiss cookie consent banner
+    await _dismiss_cookie_consent()
 
     for attempt_try in range(3):
         try:
