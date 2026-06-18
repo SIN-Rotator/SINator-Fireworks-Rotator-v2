@@ -45,6 +45,10 @@ def sync_v2_to_v3():
         json.dump(v3_keys, open(V3_POOL, 'w'), indent=2)
         print(f"✅ Reset used flag for {reset_count} keys")
 
+    reload_pool = False
+    if len(v3_keys) != len(json.load(open(V3_POOL))):
+        reload_pool = True
+
     return True
 
 if __name__ == "__main__":
