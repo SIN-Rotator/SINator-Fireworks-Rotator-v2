@@ -245,7 +245,25 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
     await browser_fill('input[name="confirmPassword"]', password)
     steps.append("passwords_filled")
 
-    await browser_click_by_text("Create Account", role="button")
+    # Remove cookie consent banner right before click — it may reappear
+    await browser_console("""(() => {
+        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-modal,.cky-preference-center,[class*="cky-"]').forEach(e => e.remove());
+        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
+        document.querySelectorAll('[class*="consent"],[id*="consent"],[class*="cookie-banner"],[id*="cookie-banner"]').forEach(e => e.remove());
+        document.body.style.overflow = 'visible';
+        document.documentElement.style.overflow = 'visible';
+    })()""")
+    await asyncio.sleep(0.5)
+
+    # Try normal click first, fall back to JS click if consent banner intercepts
+    try:
+        await browser_click_by_text("Create Account", role="button")
+    except Exception as e:
+        if "intercepts" in str(e).lower() or "pointer" in str(e).lower():
+            logger.info("Consent banner intercepts — using JS click fallback")
+            await browser_console("""document.querySelector('button[type="submit"], button:has-text("Create Account")').click()""")
+        else:
+            raise
     logger.info("Create Account clicked via browser_click_by_text")
 
     for _ in range(25):
