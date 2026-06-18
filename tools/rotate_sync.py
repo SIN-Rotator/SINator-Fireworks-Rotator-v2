@@ -9,8 +9,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent_toolbox" / "core"))
-
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ROTATE_SCRIPT = PROJECT_ROOT / "tools" / "rotate.py"
@@ -35,21 +33,25 @@ for i in range(N):
     )
 
     api_key = None
-    for line in proc.stdout.splitlines():
+    # rotate.py logs to stderr (logging module), so check BOTH streams
+    combined = proc.stdout + "\n" + proc.stderr
+    for line in combined.splitlines():
         if "API Key:" in line:
             api_key = line.split("API Key:")[1].strip()
-            print(f"   ✓ API Key: {api_key[:20]}...")
             break
 
     if not api_key:
         print(f"   ✗ Generation FAILED")
-        for line in proc.stdout.splitlines()[-5:]:
-            print(f"      {line}")
+        for line in combined.splitlines()[-10:]:
+            if line.strip():
+                print(f"      {line}")
         failures += 1
         if failures >= 3:
             print(f"\n⚠️  3 consecutive failures — STOPPING")
             break
         continue
+    else:
+        print(f"   ✓ API Key: {api_key[:20]}...")
 
     print(f"[2/2] Auto-syncing to dashboard (auto_sync.py)...")
     proc2 = subprocess.run(
@@ -66,8 +68,8 @@ for i in range(N):
         successes += 1
 
     if i < N - 1:
-        print(f"   ...waiting 10s before next rotation...")
-        time.sleep(10)
+        print(f"   ...waiting 5s before next rotation...")
+        time.sleep(5)
 
 t = time.time() - t0
 print(f"\n{'='*50}")
