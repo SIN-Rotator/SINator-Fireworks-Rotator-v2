@@ -4,7 +4,9 @@ Docs: batch_rotate.doc.md"""
 import asyncio, json, time, sys, subprocess
 from pathlib import Path
 
-TARGET = 69
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+TARGET = 100
 LOG_FILE = Path(__file__).resolve().parent.parent / "data" / "batch-rotate.log"
 ROTATE_SCRIPT = Path(__file__).resolve().parent / "rotate.py"
 
@@ -18,7 +20,7 @@ def log(msg):
 
 async def count_available():
     import http.client
-    conn = http.client.HTTPConnection("localhost", 8000, timeout=5)
+    conn = http.client.HTTPConnection("localhost", 8100, timeout=5)
     conn.request("GET", "/api/v1/pool/stats")
     resp = conn.getresponse()
     data = json.loads(resp.read())
