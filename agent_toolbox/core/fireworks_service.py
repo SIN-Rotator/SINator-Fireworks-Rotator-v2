@@ -875,7 +875,37 @@ async def _playwright_onboarding() -> None:
     except Exception as e:
         logger.warning(f"Page 2 button diag failed: {e}")
 
-    # DIAG: screenshot Page 2
+    # ── Install fetch INTERCEPTOR BEFORE click ───────────────────────────────
+    # Monkey-patch window.fetch so we capture what URL/method/body the React
+    # handler TRIES to send. We can then re-issue that call ourselves if it
+    # stalls or fails. This is the "bypass React click + use the same payload"
+    # strategy.
+    try:
+        await browser_console("""(() => {
+            window.__captured_onboarding_call = null;
+            const origFetch = window.fetch;
+            window.fetch = async function(input, init) {
+                const url = typeof input === 'string' ? input : (input && input.url) || '';
+                const method = (init && init.method) ? String(init.method).toUpperCase() : 'GET';
+                let body = (init && init.body) || '';
+                if (body && typeof body !== 'string') {
+                    try { body = JSON.stringify(body); } catch(e) { body = String(body); }
+                }
+                try {
+                    if (url && (url.indexOf('onboard') !== -1 || url.indexOf('signup') !== -1 || url.indexOf('/profile') !== -1)) {
+                        window.__captured_onboarding_call = { url: url, method: method, body: body };
+                        console.log('[SINATOR] Captured fetch: ' + method + ' ' + url + ' body=' + (body ? String(body).substring(0, 300) : ''));
+                    }
+                } catch(e) {}
+                return origFetch.apply(this, arguments);
+            };
+            return 'fetch_interceptor_installed';
+        })()""")
+        logger.info("Fetch interceptor installed - will capture React's onboarding call")
+    except Exception as e:
+        logger.warning(f"Fetch interceptor install failed: {e}")
+
+    # DIAG: screenshot Page 2 just before the click attempts
     try:
         from sin_browser_tools.core import manager
         os.makedirs("/tmp/onboarding-diag", exist_ok=True)
@@ -883,9 +913,6 @@ async def _playwright_onboarding() -> None:
     except Exception:
         pass
 
-    # Try multiple button texts for Page 2 submission
-    # Priority: "Submit to get $5 Credits" first (triggers actual API call), then Skip
-    submit_clicked = False
     for txt in ("Submit to get $5 Credits", "Submit", "Skip", "Finish setup", "Complete profile", "Get started", "Get $5", "Finish", "Continue", "Complete onboarding"):
         try:
             await browser_click_by_text(txt, role="button")
@@ -954,52 +981,90 @@ async def _playwright_onboarding() -> None:
     # If still on /onboarding, try direct API call to complete onboarding
     url = (await browser_get_url())["url"]
     if 'onboarding' in url:
-        logger.info("UI submit failed — trying direct fetch() to complete onboarding")
-        api_result = await browser_console("""async () => {
-            // Try common Fireworks onboarding API endpoints
-            const endpoints = [
-                '/api/v1/users/me/onboarding',
-                '/api/v1/onboarding',
-                '/api/v1/user/onboarding',
-                '/api/v1/users/onboarding',
-                '/v1/onboarding',
-                '/api/onboarding',
-            ];
-            const body = JSON.stringify({
-                useCases: ['prototype', 'flexible', 'conversational', 'search', 'agentic'],
-                skipped: false
-            });
-            for (const ep of endpoints) {
-                try {
-                    const resp = await fetch(ep, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: body
-                    });
-                    const text = await resp.text();
-                    if (resp.ok) return 'SUCCESS ' + ep + ': ' + text.substring(0, 200);
-                } catch(e) {
-                    // try next
+        # 1. First check: did React fire a fetch that we captured via interceptor?
+        captured_resp = await browser_console("(() => { try { return JSON.stringify(window.__captured_onboarding_call || null); } catch(e) { return 'error:' + e.message; } })()")
+        captured_str = (captured_resp or {}).get("result") if isinstance(captured_resp, dict) else None
+        captured = None
+        if captured_str and captured_str != 'null' and not captured_str.startswith('error:'):
+            try:
+                import json as _json
+                captured = _json.loads(captured_str)
+            except Exception:
+                captured = None
+        if captured and captured.get('url'):
+            logger.info(f"Captured fetch from React handler: {captured['method']} {captured['url'][:80]} body={(captured.get('body') or '')[:120]}")
+            # Replay the exact captured call (await it properly so server processes it)
+            cu, cm, cb = captured['url'], captured['method'], captured.get('body') or ''
+            try:
+                replay = await browser_console(f"""async () => {{
+                    try {{
+                        const r = await fetch({cu!r}, {{
+                            method: {cm!r},
+                            credentials: 'include',
+                            headers: {{'Content-Type': 'application/json', 'Accept': 'application/json'}},
+                            body: {cb!r}
+                        }});
+                        const t = await r.text();
+                        return 'CAPTURED_REPLAY ' + {cm!r} + ' ' + {cu!r} + ' status:' + r.status + ' body:' + t.substring(0, 300);
+                    }} catch(e) {{ return 'CAPTURED_REPLAY_ERROR: ' + e.message; }}
+                }}""")
+                logger.info(f"Captured replay result: {replay}")
+                api_result_ok = replay and ('status:2' in str(replay.get('result', '')))
+                if api_result_ok:
+                    await asyncio.sleep(3)
+            except Exception as e:
+                logger.warning(f"Captured replay code failed: {e}")
+        else:
+            logger.info("No captured fetch from React handler — running endpoint bruteforce")
+            api_result = await browser_console("""async () => {
+                const endpoints = [
+                    '/api/v1/users/me/onboarding-complete',
+                    '/api/v1/users/me/onboarding/complete',
+                    '/api/v1/onboarding/complete',
+                    '/api/v1/users/me/onboarding',
+                    '/api/v1/users/me/onboard',
+                    '/api/v1/users/me/onboarding/skip',
+                    '/api/v1/onboarding/skip',
+                    '/api/v1/onboarding',
+                    '/api/v1/user/onboarding',
+                    '/api/v1/users/onboarding',
+                    '/v1/onboarding',
+                    '/api/onboarding',
+                ];
+                const useCases = ['prototype','flexible','conversational','search','agentic'];
+                const bodyShapes = [
+                    JSON.stringify({useCases: useCases, completed: true}),
+                    JSON.stringify({useCases: useCases, skipped: true}),
+                    JSON.stringify({skipped: true, useCases: useCases}),
+                    JSON.stringify({useCases: useCases, step: 2, completed: true}),
+                    JSON.stringify({complete: true, useCases: useCases}),
+                    JSON.stringify({useCases: useCases, completed: false})
+                ];
+                for (const ep of endpoints) {
+                    for (const body of bodyShapes) {
+                        for (const method of ['POST','PUT','PATCH']) {
+                            try {
+                                const resp = await fetch(ep, {
+                                    method: method,
+                                    credentials: 'include',
+                                    headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+                                    body: body
+                                });
+                                const text = await resp.text();
+                                if (resp.ok) {
+                                    return method + ' ' + ep + ' status:' + resp.status + ' body:' + text.substring(0, 250) + ' sentBody:' + body.substring(0, 100);
+                                }
+                            } catch(e) {}
+                        }
+                    }
                 }
-            }
-            // Try PATCH/PUT
-            for (const ep of endpoints) {
-                try {
-                    const resp = await fetch(ep, {
-                        method: 'PATCH',
-                        headers: {'Content-Type': 'application/json'},
-                        body: body
-                    });
-                    const text = await resp.text();
-                    if (resp.ok) return 'PATCH SUCCESS ' + ep + ': ' + text.substring(0, 200);
-                } catch(e) {}
-            }
-            return 'all_endpoints_failed';
-        }""")
-        logger.info(f"Direct API call result: {api_result}")
-        if api_result and 'SUCCESS' in str(api_result.get('result', '')):
-            logger.info("Onboarding completed via direct API call!")
-            await asyncio.sleep(3)
+                return 'all_endpoints_failed';
+            }""")
+            logger.info(f"Bruteforce API call result: {api_result}")
+            api_result_ok = api_result and ('status:2' in str(api_result.get('result', '')))
+            if api_result_ok:
+                logger.info("Onboarding completed via bruteforce API call!")
+                await asyncio.sleep(3)
     try:
         post_buttons = await browser_console("""(() => {
             var b = document.querySelectorAll('button:not([class*="cky-"])');
