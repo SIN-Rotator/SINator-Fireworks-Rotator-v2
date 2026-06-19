@@ -132,7 +132,9 @@ async def launch() -> Dict[str, Any]:
     )
     page = await context.new_page()
 
-    # Stealth patches via add_init_script
+    # Stealth patches + cookie consent PREVENTION via page-level init_script
+    # NOTE: context.add_init_script broke onboarding React handlers.
+    # page.add_init_script works correctly (verified with 51+ keys).
     await page.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -154,11 +156,12 @@ async def launch() -> Dict[str, Any]:
             };
             localStorage.setItem('cookieyes-consent', JSON.stringify(consent));
             localStorage.setItem('cky-consent', 'yes:' + btoa(JSON.stringify(consent)));
-            // Also set the newer _cookieyes cookie name
             document.cookie = 'cookieyes-consent=yes; path=/; max-age=31536000; SameSite=Lax';
         } catch(e) {}
-        // Inject CSS to permanently hide all known consent banner selectors
+        // Inject CSS to permanently hide all consent banner selectors
+        // Use documentElement (always available) instead of head (may not exist yet)
         const style = document.createElement('style');
+        style.id = 'sin-consent-blocker';
         style.textContent = `
             .cky-overlay, .cky-consent-container, .cky-banner-container, .cky-modal,
             .cky-preference-center, .cky-notice, .cky-notice-group, [class*="cky-"],
@@ -172,18 +175,17 @@ async def launch() -> Dict[str, Any]:
                 opacity: 0 !important;
                 pointer-events: none !important;
                 z-index: -9999 !important;
+                height: 0 !important;
+                width: 0 !important;
+                overflow: hidden !important;
             }
             body { overflow: visible !important; }
             html { overflow: visible !important; }
         `;
-        try { document.head.appendChild(style); } catch(e) {}
-        // Auto-remove cky elements if they somehow appear (MutationObserver)
-        const observer = new MutationObserver(() => {
-            document.querySelectorAll('[class*="cky-"],[class*="onetrust"],[id*="onetrust"],[class*="consent-banner"],[id*="consent-banner"]').forEach(e => {
-                e.remove();
-            });
-        });
-        try { observer.observe(document.documentElement, {childList: true, subtree: true}); } catch(e) {}
+        try { document.documentElement.appendChild(style); } catch(e) {}
+        // NOTE: Removed MutationObserver — it was fighting CookieYes in a loop,
+        // potentially blocking React event handlers on onboarding buttons.
+        // CSS hiding + localStorage consent is sufficient.
     """)
 
     handle = _BrowserHandle(page, context, browser, pw)
@@ -266,7 +268,7 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
     steps = []
 
     await browser_navigate("https://app.fireworks.ai/signup")
-    await asyncio.sleep(3)
+    await asyncio.sleep(1)
     logger.info(f"Signup page loaded")
 
     # Dismiss cookie consent banner (preventive init_script + reactive fallback)
@@ -277,7 +279,7 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
         logger.error("Email fill failed")
         return {"status": "error", "error": "email_fill_failed", "steps_completed": steps}
     steps.append("email_filled")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.3)
 
     # Enter key — avoids carousel "Next slide" button conflict
     from sin_browser_tools.tools.navigation import browser_press
@@ -285,7 +287,7 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
     logger.info("Email submitted via Enter key")
 
     for _ in range(12):
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
         pw_count = int((await browser_console("document.querySelectorAll('input[type=password]').length"))["result"])
         if pw_count >= 2:
             break
@@ -413,7 +415,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     steps = []
 
     await browser_navigate("https://app.fireworks.ai/login")
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
 
     # Dismiss cookie consent banner (preventive init_script + reactive fallback)
     await _dismiss_cookie_consent()
@@ -441,7 +443,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     from sin_browser_tools.tools.navigation import browser_press
     await browser_press("Enter")
     logger.info("Login email submitted via Enter key")
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
 
     pw_count = int((await browser_console("document.querySelectorAll('input[type=password]').length"))["result"])
     if pw_count > 0:
@@ -457,14 +459,14 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     steps.append("form_submitted")
 
     for _ in range(15):
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if 'login' not in url.lower():
             if 'onboarding' in url:
                 logger.info("Onboarding detected, running workflow")
                 await _playwright_onboarding()
                 steps.append("onboarding_complete")
-                await asyncio.sleep(3)
+                await asyncio.sleep(1)
                 break
             if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
                 logger.info(f"Login redirect detected: {url[:60]}")
@@ -472,7 +474,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
                 return {"status": "success", "steps_completed": steps}
 
     for _ in range(10):
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if 'login' not in url.lower():
             if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
@@ -486,7 +488,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     ]:
         try:
             await browser_navigate(u)
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             url = (await browser_get_url())["url"]
             if 'login' not in url.lower():
                 steps.append("login_success")
@@ -527,6 +529,28 @@ async def _playwright_onboarding() -> None:
     # The init_script in launch() already prevents it, but call the reactive
     # fallback in case CookieYes ignored localStorage.
     await _dismiss_cookie_consent()
+
+    # Set up network response logger to catch ALL API calls during onboarding
+    from sin_browser_tools.core import manager
+    _api_responses = []
+    _console_msgs = []
+    _js_errors = []
+    async def _log_response(response):
+        url = response.url
+        if 'app.fireworks.ai' in url or 'fireworks.ai' in url:
+            status = response.status
+            try:
+                body = await response.text()
+            except:
+                body = ''
+            _api_responses.append(f'{status} {url[-80:]} body={body[:200]}')
+    def _log_console(msg):
+        _console_msgs.append(f'{msg.type}: {msg.text[:200]}')
+    def _log_pageerror(err):
+        _js_errors.append(str(err)[:300])
+    manager.page.on('response', lambda r: asyncio.ensure_future(_log_response(r)))
+    manager.page.on('console', _log_console)
+    manager.page.on('pageerror', _log_pageerror)
 
     # Verify cky-* elements are gone
     cky_count = (await browser_console("document.querySelectorAll('[class*=cky]').length") or {}).get("result", "0")
@@ -789,8 +813,8 @@ async def _playwright_onboarding() -> None:
         logger.warning(f"browser_click_by_text('Continue') failed: {e}")
 
     if not clicked_continue:
-        # Fallback: dispatchEvent on button with EXACTLY text "Continue" (no Next)
-        logger.info("Trying JS dispatchEvent on Continue button (exact match, no Next)")
+        # Fallback: JS click on button with EXACTLY text "Continue" (no Next)
+        logger.info("Trying JS click on Continue button (exact match, no Next)")
         r2 = await browser_console("""(() => {
             var b = document.querySelectorAll('button');
             for (var i=0; i<b.length; i++) {
@@ -798,14 +822,16 @@ async def _playwright_onboarding() -> None:
                 // Only match buttons whose text is EXACTLY "Continue" or contains
                 // the word "Continue" — NEVER match "Next slide" / "Next page"
                 if (t === 'Continue' || t.indexOf('Continue') !== -1) {
+                    // Use both .click() and dispatchEvent to trigger React handlers
+                    b[i].click();
                     b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
                     return t;
                 }
             }
             return 'no_continue_button';
         })()""")
-        logger.info(f"JS dispatchEvent result: {r2}")
-    await asyncio.sleep(3)
+        logger.info(f"JS Continue click result: {r2}")
+    await asyncio.sleep(2)
 
     # Verify we left page 1
     after_url = (await browser_get_url())["url"]
@@ -858,9 +884,9 @@ async def _playwright_onboarding() -> None:
         pass
 
     # Try multiple button texts for Page 2 submission
-    # Priority: Skip (bypass use cases) > exact button text > partial match
+    # Priority: "Submit to get $5 Credits" first (triggers actual API call), then Skip
     submit_clicked = False
-    for txt in ("Skip", "Submit to get $5 Credits", "Submit", "Finish setup", "Complete profile", "Get started", "Get $5", "Finish", "Continue", "Complete onboarding"):
+    for txt in ("Submit to get $5 Credits", "Submit", "Skip", "Finish setup", "Complete profile", "Get started", "Get $5", "Finish", "Continue", "Complete onboarding"):
         try:
             await browser_click_by_text(txt, role="button")
             logger.info(f"Page 2 submit clicked via '{txt}'")
@@ -868,6 +894,156 @@ async def _playwright_onboarding() -> None:
             break
         except Exception:
             continue
+
+    # ALWAYS also do JS direct click — prioritize "Submit to get $5 Credits" (triggers API)
+    logger.info("Also doing JS direct click on Submit button")
+    js_result = await browser_console("""(() => {
+        var b = document.querySelectorAll('button');
+        // Try to find and call React onClick handler directly
+        for (var i=0; i<b.length; i++) {
+            var t = (b[i].textContent || '').trim();
+            if (t === 'Submit to get $5 Credits' || t === 'Submit' || t === 'Skip') {
+                // Method 1: Find React props and call onClick directly
+                var propKey = Object.keys(b[i]).find(k => k.startsWith('__reactProps'));
+                if (propKey && b[i][propKey] && b[i][propKey].onClick) {
+                    try {
+                        b[i][propKey].onClick({preventDefault: function(){}, stopPropagation: function(){}});
+                        return 'react_onclick: ' + t;
+                    } catch(e) {
+                        // Method 2: Standard click + dispatchEvent
+                        b[i].click();
+                        b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                        return 'fallback_click: ' + t + ' (react error: ' + e.message + ')';
+                    }
+                }
+                // Method 2: Standard click + dispatchEvent
+                b[i].click();
+                b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                return 'dom_click: ' + t;
+            }
+        }
+        return 'no_button';
+    })()""")
+    logger.info(f"JS Skip click result: {js_result}")
+
+    # Also try Playwright page.click() with force=True (bypasses actionability)
+    try:
+        from sin_browser_tools.core import manager
+        page = manager.page
+        # Find Skip button via Playwright selector
+        skip_btn = page.locator('button:has-text("Submit to get $5 Credits")')
+        if await skip_btn.count() > 0:
+            await skip_btn.first.click(force=True, timeout=5000)
+            logger.info("Playwright force-click on Submit button succeeded")
+    except Exception as e:
+        logger.info(f"Playwright force-click on Submit: {e}")
+
+    await asyncio.sleep(5)
+
+    # Check if Skip worked — wait up to 15s for redirect
+    for _ in range(15):
+        url = (await browser_get_url())["url"]
+        if 'onboarding' not in url:
+            logger.info(f"Redirect after Submit: {url[:60]}")
+            break
+        await asyncio.sleep(1)
+
+    # If still on /onboarding, try direct API call to complete onboarding
+    url = (await browser_get_url())["url"]
+    if 'onboarding' in url:
+        logger.info("UI submit failed — trying direct fetch() to complete onboarding")
+        api_result = await browser_console("""async () => {
+            // Try common Fireworks onboarding API endpoints
+            const endpoints = [
+                '/api/v1/users/me/onboarding',
+                '/api/v1/onboarding',
+                '/api/v1/user/onboarding',
+                '/api/v1/users/onboarding',
+                '/v1/onboarding',
+                '/api/onboarding',
+            ];
+            const body = JSON.stringify({
+                useCases: ['prototype', 'flexible', 'conversational', 'search', 'agentic'],
+                skipped: false
+            });
+            for (const ep of endpoints) {
+                try {
+                    const resp = await fetch(ep, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: body
+                    });
+                    const text = await resp.text();
+                    if (resp.ok) return 'SUCCESS ' + ep + ': ' + text.substring(0, 200);
+                } catch(e) {
+                    // try next
+                }
+            }
+            // Try PATCH/PUT
+            for (const ep of endpoints) {
+                try {
+                    const resp = await fetch(ep, {
+                        method: 'PATCH',
+                        headers: {'Content-Type': 'application/json'},
+                        body: body
+                    });
+                    const text = await resp.text();
+                    if (resp.ok) return 'PATCH SUCCESS ' + ep + ': ' + text.substring(0, 200);
+                } catch(e) {}
+            }
+            return 'all_endpoints_failed';
+        }""")
+        logger.info(f"Direct API call result: {api_result}")
+        if api_result and 'SUCCESS' in str(api_result.get('result', '')):
+            logger.info("Onboarding completed via direct API call!")
+            await asyncio.sleep(3)
+    try:
+        post_buttons = await browser_console("""(() => {
+            var b = document.querySelectorAll('button:not([class*="cky-"])');
+            return Array.from(b).map(x => ({
+                text: (x.textContent || '').trim().substring(0, 40),
+                disabled: x.disabled,
+                type: x.type
+            }));
+        })()""")
+        logger.info(f"Post-Skip buttons (non-cky): {post_buttons}")
+        
+        post_url = (await browser_get_url())["url"]
+        post_body = (await browser_console("document.body.innerText.substring(0, 1000)") or {}).get("result", "")
+        logger.info(f"Post-Skip URL: {post_url}")
+        logger.info(f"Post-Skip body (1000 chars): {post_body[:500]}")
+        
+        # Check for any dialog/modal that might be blocking
+        dialogs = await browser_console("""(() => {
+            var d = document.querySelectorAll('[role="dialog"],[class*="modal"],[class*="Modal"],[class*="dialog"],[class*="Dialog"]');
+            return Array.from(d).map(x => ({
+                cls: x.className.substring(0, 60),
+                text: x.textContent.trim().substring(0, 100),
+                visible: x.offsetParent !== null
+            }));
+        })()""")
+        logger.info(f"Post-Skip dialogs/modals: {dialogs}")
+    except Exception as e:
+        logger.warning(f"Post-Skip diag failed: {e}")
+    await asyncio.sleep(3)
+
+    # DIAG: screenshot after Skip click to see what's on screen
+    try:
+        from sin_browser_tools.core import manager
+        os.makedirs("/tmp/onboarding-diag", exist_ok=True)
+        await manager.page.screenshot(path="/tmp/onboarding-diag/after-skip.png")
+        # Log URL and body text after skip
+        post_url = (await browser_get_url())["url"]
+        post_text = (await browser_console("document.body.innerText.substring(0, 500)") or {}).get("result", "")
+        logger.info(f"After Skip: url={post_url}, body={post_text[:200]}")
+        # Check for error messages
+        errors = await browser_console("""(() => {
+            var errs = document.querySelectorAll('[class*="error"],[class*="Error"],[role="alert"],.text-red,.text-destructive');
+            return Array.from(errs).map(e => e.textContent.trim().substring(0,100));
+        })()""")
+        logger.info(f"After Skip errors: {errors}")
+    except Exception as e:
+        logger.warning(f"DIAG after-skip failed: {e}")
 
     if not submit_clicked:
         logger.warning("No Page 2 submit button found, trying JS click on last button")
@@ -892,41 +1068,69 @@ async def _playwright_onboarding() -> None:
     # Fallback: still on /onboarding → form.requestSubmit() + Enter
     url = (await browser_get_url())["url"]
     if 'onboarding' in url:
+        # Only submit NON-cky forms (cky forms are cookie consent, not onboarding)
         await browser_console("""(() => {
-            var forms = document.forms;
+            var forms = document.querySelectorAll('form:not([class*="cky"]):not([id*="cky"])');
             for (var i=0; i<forms.length; i++) {
+                // Skip forms inside cky containers
+                if (forms[i].closest('[class*="cky-"]')) continue;
                 forms[i].requestSubmit();
-                return 'submitted';
+                return 'submitted form #' + i;
+            }
+            // Fallback: submit ALL forms except cky
+            var allForms = document.forms;
+            for (var j=0; j<allForms.length; j++) {
+                if (!allForms[j].className || allForms[j].className.indexOf('cky') === -1) {
+                    allForms[j].requestSubmit();
+                    return 'submitted allForms #' + j;
+                }
             }
             return 'no_form';
         })()""")
-        logger.info("Form submitted via requestSubmit()")
-        await asyncio.sleep(5)
+        logger.info("Form submitted via requestSubmit() (non-cky forms only)")
+        await asyncio.sleep(3)
         url = (await browser_get_url())["url"]
         if 'onboarding' in url:
             await browser_press("Enter")
-            logger.info("Enter key sent as Submit fallback (disabled bypass)")
-            await asyncio.sleep(5)
+            logger.info("Enter key sent as Submit fallback")
+            await asyncio.sleep(2)
 
-    for _ in range(45):  # 45s wait — server-side processing can be slow
+    for _ in range(30):  # 30s wait — server-side processing can be slow
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
             logger.info(f"Onboarding redirect: {url[:60]}")
             return
     else:
-        logger.warning("Playwright onboarding — kein Redirect nach 45s, force navigate")
-        try:
-            await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
-            # Wait a bit longer for the force-navigate to take effect
-            for _ in range(15):
-                await asyncio.sleep(1)
+        # Log ALL API responses, console msgs, and JS errors before giving up
+        if _api_responses:
+            for r in _api_responses[-10:]:
+                logger.info(f"NET: {r}")
+        else:
+            logger.warning("No API calls logged during onboarding at all")
+        if _console_msgs:
+            for m in _console_msgs[-10:]:
+                logger.info(f"CONSOLE: {m}")
+        if _js_errors:
+            for e in _js_errors:
+                logger.error(f"JS_ERROR: {e}")
+        logger.warning("Onboarding — kein Redirect nach 30s, force navigate")
+        # First try /account/home (triggers onboarding completion server-side)
+        for nav_url in [
+            "https://app.fireworks.ai/account/home",
+            "https://app.fireworks.ai/settings/users/api-keys",
+            "https://app.fireworks.ai/",
+        ]:
+            try:
+                await browser_navigate(nav_url)
+                await asyncio.sleep(3)
                 url = (await browser_get_url())["url"]
-                if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
-                    logger.info(f"Force-nav redirect: {url[:60]}")
+                logger.info(f"Force-nav to {nav_url[-30:]} → {url[:60]}")
+                if 'onboarding' not in url:
+                    logger.info(f"Escaped onboarding: {url[:60]}")
                     return
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 
 # ── API Key ─────────────────────────────────────────────────────────────────
@@ -952,7 +1156,7 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     from sin_browser_tools.tools.vision import browser_get_text
 
     await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
-    await asyncio.sleep(3)
+    await asyncio.sleep(1)
 
     for _ in range(3):
         url = (await browser_get_url())["url"]
@@ -965,7 +1169,7 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
                 pass
             await asyncio.sleep(1)
             await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
         else:
             break
 
@@ -982,7 +1186,7 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     for attempt_try in range(3):
         try:
             await browser_click_by_text("Create API Key", role="button")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         except Exception:
             if attempt_try < 2:
                 logger.warning("Create API Key button not found — retry")
@@ -992,7 +1196,7 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
 
         try:
             await browser_click_by_text("API Key", role="menuitem")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         except Exception:
             pass
 
@@ -1008,7 +1212,7 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
         name = key_name + suffix
 
         await browser_fill('input[name="name"]', name)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.3)
 
         try:
             await browser_click_by_text("Generate", role="button")
@@ -1021,7 +1225,7 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
                     continue
 
         for _ in range(15):
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             text = (await browser_get_text("body")).get("text", "")
             keys = re.findall(r'fw_[a-zA-Z0-9]{20,}', text)
             if keys:
