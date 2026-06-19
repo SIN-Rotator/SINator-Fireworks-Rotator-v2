@@ -938,10 +938,13 @@ async def _playwright_onboarding() -> None:
     except Exception as e:
         logger.info(f"Playwright force-click on Submit: {e}")
 
-    await asyncio.sleep(5)
+    # Wait much longer after the Submit/Skip click for the server-side
+    # onboarding completion to process. React onClick fires an async API call
+    # and redirect; interrupting too early causes a fallback to login.
+    await asyncio.sleep(25)
 
-    # Check if Skip worked — wait up to 15s for redirect
-    for _ in range(15):
+    # Check if Submit/Skip worked — wait up to 30s for redirect
+    for _ in range(30):
         url = (await browser_get_url())["url"]
         if 'onboarding' not in url:
             logger.info(f"Redirect after Submit: {url[:60]}")
@@ -1095,7 +1098,9 @@ async def _playwright_onboarding() -> None:
             logger.info("Enter key sent as Submit fallback")
             await asyncio.sleep(2)
 
-    for _ in range(30):  # 30s wait — server-side processing can be slow
+    # Final long wait: give the server-side redirect up to 60s after all
+    # fallback attempts. Do NOT force-navigate back to login prematurely.
+    for _ in range(60):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
@@ -1114,7 +1119,7 @@ async def _playwright_onboarding() -> None:
         if _js_errors:
             for e in _js_errors:
                 logger.error(f"JS_ERROR: {e}")
-        logger.warning("Onboarding — kein Redirect nach 30s, force navigate")
+        logger.warning("Onboarding — kein Redirect nach 60s, force navigate")
         # First try /account/home (triggers onboarding completion server-side)
         for nav_url in [
             "https://app.fireworks.ai/account/home",
