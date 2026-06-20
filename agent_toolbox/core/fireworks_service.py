@@ -268,7 +268,7 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
     steps = []
 
     await browser_navigate("https://app.fireworks.ai/signup")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
     logger.info(f"Signup page loaded")
 
     # Dismiss cookie consent banner (preventive init_script + reactive fallback)
@@ -415,7 +415,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     steps = []
 
     await browser_navigate("https://app.fireworks.ai/login")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
 
     # Dismiss cookie consent banner (preventive init_script + reactive fallback)
     await _dismiss_cookie_consent()
@@ -431,7 +431,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
             await browser_navigate("https://app.fireworks.ai/login?useEmail=true")
         except Exception:
             pass
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         email_count = int((await browser_console("document.querySelectorAll('input[name=email]').length"))["result"])
         if email_count > 0:
             break
@@ -443,7 +443,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     from sin_browser_tools.tools.navigation import browser_press
     await browser_press("Enter")
     logger.info("Login email submitted via Enter key")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
 
     pw_count = int((await browser_console("document.querySelectorAll('input[type=password]').length"))["result"])
     if pw_count > 0:
@@ -455,7 +455,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
 
     from sin_browser_tools.tools.navigation import browser_press
     await browser_press("Enter")
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
     steps.append("form_submitted")
 
     for _ in range(15):
@@ -831,7 +831,7 @@ async def _playwright_onboarding() -> None:
             return 'no_continue_button';
         })()""")
         logger.info(f"JS Continue click result: {r2}")
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
 
     # Verify we left page 1
     after_url = (await browser_get_url())["url"]
@@ -1007,7 +1007,7 @@ async def _playwright_onboarding() -> None:
                 logger.info(f"Captured replay result: {replay}")
                 api_result_ok = replay and ('status:2' in str(replay.get('result', '')))
                 if api_result_ok:
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(1)
             except Exception as e:
                 logger.warning(f"Captured replay code failed: {e}")
         else:
@@ -1088,7 +1088,6 @@ async def _playwright_onboarding() -> None:
         logger.info(f"Post-Skip dialogs/modals: {dialogs}")
     except Exception as e:
         logger.warning(f"Post-Skip diag failed: {e}")
-    await asyncio.sleep(3)
 
     # DIAG: screenshot after Skip click to see what's on screen
     try:
@@ -1126,8 +1125,6 @@ async def _playwright_onboarding() -> None:
         except Exception as e:
             logger.warning(f"JS button click failed: {e}")
 
-    await asyncio.sleep(2)
-
     # Fallback: still on /onboarding → form.requestSubmit() + Enter
     url = (await browser_get_url())["url"]
     if 'onboarding' in url:
@@ -1151,12 +1148,12 @@ async def _playwright_onboarding() -> None:
             return 'no_form';
         })()""")
         logger.info("Form submitted via requestSubmit() (non-cky forms only)")
-        await asyncio.sleep(3)
+        await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if 'onboarding' in url:
             await browser_press("Enter")
             logger.info("Enter key sent as Submit fallback")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
     # Final long wait: poll every 5s, max 60s
     for _ in range(12):
@@ -1220,20 +1217,19 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     from sin_browser_tools.tools.vision import browser_get_text
 
     await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
 
     for _ in range(3):
         url = (await browser_get_url())["url"]
         if 'login' in url.lower():
             logger.warning(f"Redirected to login — retrying ({url[:60]})")
-            # Try to log in directly from this page (it has redirectURI)
             try:
-                await browser_press("Enter")  # might submit a pre-filled form
+                await browser_press("Enter")
             except Exception:
                 pass
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
         else:
             break
 
@@ -1244,23 +1240,22 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
 
     logger.info(f"API Keys page loaded: {url[:80]}")
 
-    # Dismiss cookie consent banner
     await _dismiss_cookie_consent()
 
     for attempt_try in range(3):
         try:
             await browser_click_by_text("Create API Key", role="button")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
         except Exception:
             if attempt_try < 2:
                 logger.warning("Create API Key button not found — retry")
                 await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
-                await asyncio.sleep(3)
+                await asyncio.sleep(1)
                 continue
 
         try:
             await browser_click_by_text("API Key", role="menuitem")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
         except Exception:
             pass
 
@@ -1276,7 +1271,7 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
         name = key_name + suffix
 
         await browser_fill('input[name="name"]', name)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.1)
 
         try:
             await browser_click_by_text("Generate", role="button")
@@ -1288,8 +1283,8 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
                 except Exception:
                     continue
 
-        for _ in range(15):
-            await asyncio.sleep(0.5)
+        for _ in range(20):
+            await asyncio.sleep(0.2)
             text = (await browser_get_text("body")).get("text", "")
             keys = re.findall(r'fw_[a-zA-Z0-9]{20,}', text)
             if keys:
@@ -1300,7 +1295,7 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
             for kw in ('Close', 'Cancel', 'OK'):
                 try:
                     await browser_click_by_text(kw, role="button")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.3)
                     break
                 except Exception:
                     continue
