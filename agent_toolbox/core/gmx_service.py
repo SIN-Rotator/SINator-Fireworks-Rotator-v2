@@ -83,7 +83,7 @@ class GmxService:
             return False
         logger.info("Navigiere inbox_tab zum Posteingang...")
         await self.inbox_tab.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
-        await asyncio.sleep(5)
+        await asyncio.sleep(2)
         body = await self.inbox_tab.evaluate("() => document.body.innerText")
         if "Nicht eingeloggt" in body or ("anmelden" in body.lower()[:200] and "E-Mail" not in body):
             logger.error("inbox_tab Session ungültig — Login vorher ausführen!")
@@ -326,9 +326,7 @@ class GmxService:
 
             # 4. Click via locator (force=True wegen webmailer-mail-detail overlay)
             await mail_frame.locator('list-mail-item').nth(latest['idx']).click(timeout=10000, force=True)
-            await asyncio.sleep(8)
-
-            # 5. Scan ALL frames via browser_scan_frames (Issue #15 tool)
+            await asyncio.sleep(3)
             deadline = time.time() + 20
             while time.time() < deadline:
                 scan = await browser_scan_frames(regex=r'https://app\.fireworks\.ai/signup/confirm\?[^\s"\'<>]+')
@@ -420,7 +418,7 @@ class GmxService:
         logger.info(f"[_login] Logging in to GMX as {email}")
         try:
             await page.goto("https://www.gmx.net/", wait_until="domcontentloaded")
-            await asyncio.sleep(5)  # Wait for JS redirect
+            await asyncio.sleep(2)  # Wait for JS redirect
             
             url = page.url
             
@@ -680,7 +678,7 @@ class GmxService:
         jump_url = f"https://navigator.gmx.net/navigator/jump/to/mail_settings?sid={sid}"
         logger.info(f"STEP 1: Navigating to jump URL")
         await page.goto(jump_url, wait_until="domcontentloaded")
-        await asyncio.sleep(6)
+        await asyncio.sleep(3)
         
         url = page.url
         logger.info(f"After jump: {url[:100]}")

@@ -69,7 +69,7 @@ for i in range(N):
 
     if i < N - 1:
         print(f"   ...waiting 5s before next rotation...")
-        time.sleep(5)
+        time.sleep(1)
 
 t = time.time() - t0
 print(f"\n{'='*50}")

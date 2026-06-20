@@ -965,18 +965,14 @@ async def _playwright_onboarding() -> None:
     except Exception as e:
         logger.info(f"Playwright force-click on Submit: {e}")
 
-    # Wait much longer after the Submit/Skip click for the server-side
-    # onboarding completion to process. React onClick fires an async API call
-    # and redirect; interrupting too early causes a fallback to login.
-    await asyncio.sleep(25)
-
-    # Check if Submit/Skip worked — wait up to 30s for redirect
-    for _ in range(30):
+    # Poll every 5s for onboarding redirect (max 60s)
+    for attempt in range(12):
+        await asyncio.sleep(5)
         url = (await browser_get_url())["url"]
         if 'onboarding' not in url:
-            logger.info(f"Redirect after Submit: {url[:60]}")
+            logger.info(f"Redirect after Submit (poll {attempt+1}/12, {(attempt+1)*5}s): {url[:60]}")
             break
-        await asyncio.sleep(1)
+        logger.info(f"Onboarding poll {attempt+1}/12 — still on /onboarding ({(attempt+1)*5}s)")
 
     # If still on /onboarding, try direct API call to complete onboarding
     url = (await browser_get_url())["url"]
@@ -1064,7 +1060,6 @@ async def _playwright_onboarding() -> None:
             api_result_ok = api_result and ('status:2' in str(api_result.get('result', '')))
             if api_result_ok:
                 logger.info("Onboarding completed via bruteforce API call!")
-                await asyncio.sleep(3)
     try:
         post_buttons = await browser_console("""(() => {
             var b = document.querySelectorAll('button:not([class*="cky-"])');
@@ -1163,10 +1158,9 @@ async def _playwright_onboarding() -> None:
             logger.info("Enter key sent as Submit fallback")
             await asyncio.sleep(2)
 
-    # Final long wait: give the server-side redirect up to 60s after all
-    # fallback attempts. Do NOT force-navigate back to login prematurely.
-    for _ in range(60):
-        await asyncio.sleep(1)
+    # Final long wait: poll every 5s, max 60s
+    for _ in range(12):
+        await asyncio.sleep(5)
         url = (await browser_get_url())["url"]
         if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
             logger.info(f"Onboarding redirect: {url[:60]}")

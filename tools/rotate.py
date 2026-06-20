@@ -92,7 +92,7 @@ async def main():
         # Step 0: GMX Login
         logged_in = False
         await work_tab.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
-        await asyncio.sleep(3)
+        await asyncio.sleep(1)
         if "navigator.gmx.net/mail" in work_tab.url and "login" not in work_tab.url.lower():
             logger.info("GMX session active in Profile 73")
             logged_in = True
@@ -147,10 +147,10 @@ async def main():
         logger.info("=== OTP Polling (User Chrome) ===")
         await work_tab.bring_to_front()
         await work_tab.goto(gmx_work_url, wait_until="domcontentloaded")
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         # Refresh once so the verify email from the Fireworks signup shows up
         await work_tab.reload(wait_until="domcontentloaded")
-        await asyncio.sleep(3)
+        await asyncio.sleep(1)
 
         verify_ok = False
         otp_url = None
