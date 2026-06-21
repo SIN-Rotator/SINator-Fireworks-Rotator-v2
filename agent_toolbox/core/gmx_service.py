@@ -761,10 +761,10 @@ class GmxService:
             lines = text.split('\n')
             for line in lines:
                 line = line.strip()
-                if '@gmx.' in line and 'nemotronv3@gmx.de' not in line and 'opensin@gmx.de' not in line:
+                if '@gmx.' in line and 'jerosin@gmx.net' not in line and 'opensin@gmx.de' not in line:
                     parts = line.split()
                     for part in parts:
-                        if '@gmx.' in part and part != 'nemotronv3@gmx.de' and part != 'opensin@gmx.de':
+                        if '@gmx.' in part and part != 'jerosin@gmx.net' and part != 'opensin@gmx.de':
                             logger.info(f"Found alias: {part}")
                             return part
         except Exception as e:
