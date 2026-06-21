@@ -913,6 +913,7 @@ async def _playwright_onboarding() -> None:
     except Exception:
         pass
 
+    submit_clicked = False
     for txt in ("Submit to get $5 Credits", "Submit", "Skip", "Finish setup", "Complete profile", "Get started", "Get $5", "Finish", "Continue", "Complete onboarding"):
         try:
             await browser_click_by_text(txt, role="button")
