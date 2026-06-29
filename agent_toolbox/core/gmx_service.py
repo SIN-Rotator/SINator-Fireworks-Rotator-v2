@@ -597,6 +597,13 @@ class GmxService:
                             return True
                         if "navigator.gmx.net" in url:
                             return True
+                        # V20: GMX may redirect to www.gmx.net/ — verify
+                        if "gmx.net" in url and "nologin" not in url:
+                            logger.info("Login may have succeeded — verifying via mail nav")
+                            await page.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
+                            await asyncio.sleep(3)
+                            if "navigator.gmx.net" in page.url and "login" not in page.url.lower():
+                                return True
                 else:
                     logger.warning("Login button not found on homepage")
             except Exception as e:
@@ -617,7 +624,20 @@ class GmxService:
             
             url = page.url
             logger.info(f"Legacy login result URL: {url[:80]}")
-            return "navigator.gmx.net" in url
+            if "navigator.gmx.net" in url:
+                return True
+            # V20: GMX may redirect to www.gmx.net/ after successful login
+            # but the session IS active. Navigate to mail to confirm.
+            if "gmx.net" in url and "nologin" not in url:
+                logger.info("Login may have succeeded (gmx.net URL) — verifying by navigating to mail")
+                await page.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
+                await asyncio.sleep(3)
+                url2 = page.url
+                logger.info(f"After navigation to mail: {url2[:80]}")
+                if "navigator.gmx.net" in url2 and "login" not in url2.lower():
+                    logger.info("Login confirmed via mail navigation")
+                    return True
+            return False
             
         except Exception as e:
             logger.error(f"Login error: {e}")
