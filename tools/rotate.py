@@ -79,29 +79,60 @@ async def main():
 
     fw_mgr = None
     alias = None
+    ctx = None
+    work_tab = None
+    created_ctx = False
     try:
         from gmx_service import GmxService
         gmx = GmxService()
 
-        ctx = await gmx_browser.new_context()
-        work_tab = await ctx.new_page()
+        # Bug 1 fix: use existing context (browser.contexts[0]) when connecting via CDP
+        # so GMX session cookies persist between runs. Only create new context when
+        # launching a fresh browser (no CDP).
+        if args.cdp_port and gmx_browser.contexts:
+            ctx = gmx_browser.contexts[0]
+            logger.info(f"Using existing browser context ({len(ctx.pages)} pages)")
+            if ctx.pages:
+                work_tab = ctx.pages[0]
+                logger.info(f"Reusing existing page: {work_tab.url[:60]}")
+            else:
+                work_tab = await ctx.new_page()
+        else:
+            ctx = await gmx_browser.new_context()
+            created_ctx = True
+            work_tab = await ctx.new_page()
         gmx.work_tab = work_tab
         gmx.inbox_tab = work_tab
         await work_tab.bring_to_front()
 
-        # Step 0: GMX Login
+        # Step 0: GMX Login (with retry — Bug 4 fix)
         logged_in = False
-        await work_tab.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
-        await asyncio.sleep(1)
-        if "navigator.gmx.net/mail" in work_tab.url and "login" not in work_tab.url.lower():
-            logger.info("GMX session active in Profile 73")
+        # Bug 3 fix: check existing page URL first instead of blindly navigating
+        current_url = work_tab.url or ""
+        if "navigator.gmx.net/mail" in current_url and "login" not in current_url.lower():
+            logger.info(f"GMX session active (existing page): {current_url[:60]}")
             logged_in = True
         else:
-            logger.info("GMX login via Profile 73")
-            logged_in = await gmx._login(work_tab, email=args.gmx_email, password=args.gmx_password)
-            if not logged_in:
-                logger.error("GMX Login failed")
-                return
+            # Try navigator.gmx.net/mail to check if session cookies are still valid
+            await work_tab.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
+            await asyncio.sleep(2)
+            if "navigator.gmx.net/mail" in work_tab.url and "login" not in work_tab.url.lower():
+                logger.info("GMX session active via cookie persistence")
+                logged_in = True
+            else:
+                logger.info("GMX login required — attempting login (up to 2 retries)")
+                for login_attempt in range(2):
+                    if login_attempt > 0:
+                        logger.info(f"Login retry {login_attempt + 1}/2 — waiting 10s before retry")
+                        await asyncio.sleep(10)
+                    logged_in = await gmx._login(work_tab, email=args.gmx_email, password=args.gmx_password)
+                    if logged_in:
+                        logger.info(f"GMX login succeeded on attempt {login_attempt + 1}")
+                        break
+                    logger.warning(f"GMX login attempt {login_attempt + 1} failed")
+                if not logged_in:
+                    logger.error("GMX Login failed after 2 attempts")
+                    return
 
         sid_match = re.search(r"[?&]sid=([a-f0-9]{40,})", work_tab.url)
         gmx_sid = sid_match.group(1) if sid_match else None
@@ -206,6 +237,17 @@ async def main():
         if fw_mgr:
             logger.info("Closing Bot Chrome (Fireworks)")
             await cleanup_bot(fw_mgr)
+        # Bug 2 fix: close work_tab to prevent page accumulation
+        if work_tab and not args.cdp_port:
+            try:
+                await work_tab.close()
+            except Exception:
+                pass
+        if created_ctx and ctx:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
         if gmx_browser:
             if args.cdp_port:
                 logger.info("Disconnecting from User Chrome (CDP — NOT closing)")

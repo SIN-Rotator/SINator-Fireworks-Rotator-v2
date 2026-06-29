@@ -542,7 +542,7 @@ class GmxService:
                 if await login_btn.is_visible(timeout=3000):
                     await login_btn.click()
                     logger.info("Clicked Login")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(3)
                 else:
                     btns = await page.query_selector_all('button')
                     for b in btns:
@@ -550,11 +550,16 @@ class GmxService:
                         if 'Login' == t:
                             await b.click()
                             logger.info("Clicked Login button")
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(3)
                             break
                 
-                # Check result
+                # Bug 5 fix: poll URL for up to 15s instead of fixed 5s wait
                 url = page.url
+                for _poll in range(12):
+                    if "navigator.gmx.net" in url:
+                        break
+                    await asyncio.sleep(1)
+                    url = page.url
                 logger.info(f"After login, URL: {url[:80]}")
                 if "navigator.gmx.net/mail?sid=" in url:
                     logger.info("Login successful, got SID")
