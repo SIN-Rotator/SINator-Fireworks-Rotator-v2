@@ -90,6 +90,55 @@ class _BrowserHandle:
 
 # ── Launch / Cleanup ────────────────────────────────────────────────────────
 
+async def _poll_for(condition_fn, timeout: float = 10.0, interval: float = 0.3, label: str = ""):
+    """Poll until condition_fn() returns True or timeout reached.
+    
+    Replaces fixed asyncio.sleep() with fast responsive polling.
+    condition_fn is an async callable that returns True when ready.
+    Returns True if condition met, False on timeout.
+    """
+    elapsed = 0.0
+    while elapsed < timeout:
+        try:
+            if await condition_fn():
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(interval)
+        elapsed += interval
+    if label:
+        logger.debug(f"Poll timeout ({label}): {timeout:.1f}s")
+    return False
+
+
+async def _poll_for_element(selector: str, timeout: float = 10.0, interval: float = 0.3) -> bool:
+    """Poll until a DOM element matching selector exists."""
+    from sin_browser_tools.tools.extraction import browser_console
+    async def check():
+        count = int((await browser_console(f"document.querySelectorAll('{selector}').length"))["result"])
+        return count > 0
+    return await _poll_for(check, timeout, interval, f"element: {selector}")
+
+
+async def _poll_for_url_contains(keyword: str, timeout: float = 10.0, interval: float = 0.3) -> bool:
+    """Poll until current URL contains keyword."""
+    from sin_browser_tools.tools.navigation import browser_get_url
+    async def check():
+        url = (await browser_get_url())["url"]
+        return keyword in url.lower()
+    return await _poll_for(check, timeout, interval, f"url contains: {keyword}")
+
+
+async def _poll_for_url_change(old_url: str, timeout: float = 10.0, interval: float = 0.3) -> bool:
+    """Poll until URL changes from old_url."""
+    from sin_browser_tools.tools.navigation import browser_get_url
+    async def check():
+        url = (await browser_get_url())["url"]
+        return url != old_url
+    return await _poll_for(check, timeout, interval, "url change")
+
+
+
 async def launch() -> Dict[str, Any]:
     """Launch Bot Chrome with stealth patches and register with SIN-Browser-Tools.
 
@@ -268,7 +317,7 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
     steps = []
 
     await browser_navigate("https://app.fireworks.ai/signup")
-    await asyncio.sleep(0.5)
+    # No fixed sleep — form elements polled below
     logger.info(f"Signup page loaded")
 
     # Dismiss cookie consent banner (preventive init_script + reactive fallback)
@@ -355,7 +404,8 @@ async def verify_account(verify_url: str, **kwargs) -> bool:
 
     try:
         await browser_navigate(verify_url)
-        await asyncio.sleep(2)
+        # Poll for page load (replaces fixed 2s sleep)
+        await _poll_for_url_change("about:blank", timeout=10, interval=0.3)
         # Dismiss cookie consent banner on verify redirect page
         await _dismiss_cookie_consent()
         url = (await browser_get_url())["url"]
@@ -415,7 +465,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     steps = []
 
     await browser_navigate("https://app.fireworks.ai/login")
-    await asyncio.sleep(0.5)
+    # No fixed sleep — cookie consent + login form handled below
 
     # Dismiss cookie consent banner (preventive init_script + reactive fallback)
     await _dismiss_cookie_consent()
@@ -443,7 +493,8 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     from sin_browser_tools.tools.navigation import browser_press
     await browser_press("Enter")
     logger.info("Login email submitted via Enter key")
-    await asyncio.sleep(0.5)
+    # Poll for password field to appear (replaces fixed sleep)
+    await _poll_for_element('input[type="password"]', timeout=8, interval=0.2)
 
     pw_count = int((await browser_console("document.querySelectorAll('input[type=password]').length"))["result"])
     if pw_count > 0:
@@ -455,7 +506,8 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
 
     from sin_browser_tools.tools.navigation import browser_press
     await browser_press("Enter")
-    await asyncio.sleep(1)
+    old_url = "https://app.fireworks.ai/login"
+    await _poll_for_url_change(old_url, timeout=10, interval=0.3)
     steps.append("form_submitted")
 
     for _ in range(15):
@@ -466,7 +518,6 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
                 logger.info("Onboarding detected, running workflow")
                 await _playwright_onboarding()
                 steps.append("onboarding_complete")
-                await asyncio.sleep(1)
                 break
             if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
                 logger.info(f"Login redirect detected: {url[:60]}")
@@ -966,9 +1017,9 @@ async def _playwright_onboarding() -> None:
     except Exception as e:
         logger.info(f"Playwright force-click on Submit: {e}")
 
-    # Poll every 5s for onboarding redirect (max 60s)
-    for attempt in range(12):
-        await asyncio.sleep(5)
+    # Poll every 1s for onboarding redirect (max 60s) — was 5s, now responsive
+    for attempt in range(60):
+        await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if 'onboarding' not in url:
             logger.info(f"Redirect after Submit (poll {attempt+1}/12, {(attempt+1)*5}s): {url[:60]}")
@@ -1224,11 +1275,10 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     for nav_attempt in range(3):
         try:
             await browser_navigate(API_KEYS_URL)
-            await asyncio.sleep(0.5)
-            url = (await browser_get_url())["url"]
-            if "api-keys" in url or "settings" in url:
+            if await _poll_for_url_contains("api-keys", timeout=5, interval=0.2):
                 navigated = True
                 break
+            url = (await browser_get_url())["url"]
             logger.warning(f"Nav attempt {nav_attempt+1}: landed on {url[:60]} — retrying")
         except Exception as e:
             logger.warning(f"Nav attempt {nav_attempt+1} failed: {e} — retrying in 3s")
@@ -1279,25 +1329,24 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     for attempt_try in range(3):
         try:
             await browser_click_by_text("Create API Key", role="button")
-            await asyncio.sleep(0.3)
+            # No fixed sleep — poll for dialog input below
         except Exception:
             if attempt_try < 2:
                 logger.warning("Create API Key button not found — retry")
                 try:
                     await browser_navigate(API_KEYS_URL)
+                    await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
                 except Exception:
                     pass
-                await asyncio.sleep(2)
                 continue
 
         try:
             await browser_click_by_text("API Key", role="menuitem")
-            await asyncio.sleep(0.3)
         except Exception:
             pass
 
-        inp_count = int((await browser_console("document.querySelectorAll('input[name=name]').length"))["result"])
-        if inp_count > 0:
+        # Poll for dialog input to appear (replaces fixed sleep)
+        if await _poll_for_element('input[name="name"]', timeout=5, interval=0.2):
             break
     else:
         logger.error("API Key dialog never appeared")
