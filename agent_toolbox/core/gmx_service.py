@@ -417,6 +417,29 @@ class GmxService:
         """Login to GMX via Playwright. Two-step flow: Email → Weiter → Password → Login."""
         logger.info(f"[_login] Logging in to GMX as {email}")
         try:
+            async def normalize_auth_prompt() -> None:
+                if "auth.gmx.net" in page.url and "prompt=none" in page.url:
+                    login_url = page.url.replace("prompt=none", "prompt=login")
+                    logger.info("prompt=none detected — reloading auth page with prompt=login")
+                    await page.goto(login_url, wait_until="domcontentloaded")
+                    await asyncio.sleep(2)
+
+            async def click_visible_button(label: str, timeout_ms: int = 5000) -> bool:
+                deadline = time.time() + timeout_ms / 1000
+                while time.time() < deadline:
+                    for button in await page.query_selector_all("button"):
+                        text = ((await button.text_content()) or "").strip()
+                        if text != label or not await button.is_visible():
+                            continue
+                        box = await button.bounding_box()
+                        if box:
+                            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                        else:
+                            await button.click(force=True)
+                        return True
+                    await asyncio.sleep(0.25)
+                return False
+
             await page.goto("https://www.gmx.net/", wait_until="domcontentloaded")
             await asyncio.sleep(2)  # Wait for JS redirect
             
@@ -480,6 +503,7 @@ class GmxService:
             
             # On auth.gmx.net login page — step 1: fill email, click Weiter
             if "auth.gmx.net" in url or "login.gmx.net" in url:
+                await normalize_auth_prompt()
                 logger.info("Step 1: Filling email on auth.gmx.net")
                 # The email input has name=username, id=email
                 email_input = page.locator('input[id="email"], input[name="username"]').first
@@ -545,11 +569,10 @@ class GmxService:
             # Fallback: click Login button on homepage, then two-step auth
             logger.info("Homepage without login form — clicking Login button")
             try:
-                login_btn = page.locator('button:has-text("Login")').first
-                if await login_btn.is_visible(timeout=3000):
-                    await login_btn.click()
+                if await click_visible_button("Login"):
                     logger.info("Clicked Login button on homepage")
                     await asyncio.sleep(5)
+                    await normalize_auth_prompt()
                     url = page.url
                     logger.info(f"After login click: {url[:80]}")
                     
