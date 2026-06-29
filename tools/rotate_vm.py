@@ -140,6 +140,7 @@ def acquire_lock():
     """Acquire exclusive file lock. Returns True if acquired, False if another process holds it."""
     global LOCK_FD
     LOCK_FD = open(LOCK_FILE, "w")
+    os.chmod(LOCK_FILE, 0o666)  # world-writable so root + ubuntu can share
     try:
         fcntl.flock(LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
         LOCK_FD.write(f"{os.getpid()}\n")

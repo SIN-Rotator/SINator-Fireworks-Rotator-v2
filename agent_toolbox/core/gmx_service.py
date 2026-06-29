@@ -46,6 +46,8 @@ class GmxService:
         self.context = context
         self.inbox_tab: Optional[Page] = None
         self.work_tab: Optional[Page] = None
+        self._last_login_attempt: float = 0.0
+        self._login_cooldown: float = 60.0  # min 60s between login attempts
         self.adjectives = [
             "elron", "dark", "swift", "iron", "silver", "golden", "crystal", "shadow",
             "storm", "frost", "blaze", "thunder", "cosmic", "neon", "cyber", "quantum",
@@ -58,6 +60,34 @@ class GmxService:
             "bear", "lion", "whale", "dolphin", "puma", "cheetah", "otter", "badger",
             "wolverine", "raptor", "condor", "viper", "scorpion", "spider", "mantis", "beetle",
         ]
+
+
+
+    def _check_login_cooldown(self) -> bool:
+        """Returns True if enough time has passed since last login attempt."""
+        elapsed = time.time() - self._last_login_attempt
+        if elapsed < self._login_cooldown:
+            logger.warning(f"Login cooldown: {self._login_cooldown - elapsed:.0f}s remaining")
+            return False
+        return True
+
+    async def _try_restore_session(self) -> bool:
+        """Try restoring GMX cookies from backup before attempting login."""
+        import subprocess, os
+        try:
+            # Run restore script — works as root (systemd) or ubuntu (NOPASSWD sudo)
+            cmd = ["/opt/sinator-fireworks/tools/restore_gmx_session.sh"]
+            if os.geteuid() != 0:
+                cmd.insert(0, "sudo")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                logger.info("GMX session restored from backup")
+                return True
+            else:
+                logger.info(f"Session restore: {result.stdout.strip()}")
+        except Exception as e:
+            logger.warning(f"Session restore failed: {e}")
+        return False
 
     def generate_alias_name(self) -> str:
         adj = random.choice(self.adjectives)
@@ -413,33 +443,20 @@ class GmxService:
         
         return page
 
-    async def _login(self, page: Page, email: str, password: str) -> bool:
-        """Login to GMX via Playwright. Two-step flow: Email → Weiter → Password → Login."""
+    async def _login(self, page: Page, email: str = None, password: str = None) -> bool:
+        """Login to GMX via Playwright. Two-step flow: Email → Weiter → Password → Login.
+        Rate-limited: min 60s between attempts to avoid GMX account blocking."""
+        if not self._check_login_cooldown():
+            logger.error("Login attempt blocked by cooldown — GMX may block account")
+            return False
+        self._last_login_attempt = time.time()
+        if not email or not password:
+            from agent_toolbox.core.config_manager import get_config
+            cfg = get_config()
+            email = email or cfg.gmx_email
+            password = password or cfg.gmx_password
         logger.info(f"[_login] Logging in to GMX as {email}")
         try:
-            async def normalize_auth_prompt() -> None:
-                if "auth.gmx.net" in page.url and "prompt=none" in page.url:
-                    login_url = page.url.replace("prompt=none", "prompt=login")
-                    logger.info("prompt=none detected — reloading auth page with prompt=login")
-                    await page.goto(login_url, wait_until="domcontentloaded")
-                    await asyncio.sleep(2)
-
-            async def click_visible_button(label: str, timeout_ms: int = 5000) -> bool:
-                deadline = time.time() + timeout_ms / 1000
-                while time.time() < deadline:
-                    for button in await page.query_selector_all("button"):
-                        text = ((await button.text_content()) or "").strip()
-                        if text != label or not await button.is_visible():
-                            continue
-                        box = await button.bounding_box()
-                        if box:
-                            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                        else:
-                            await button.click(force=True)
-                        return True
-                    await asyncio.sleep(0.25)
-                return False
-
             await page.goto("https://www.gmx.net/", wait_until="domcontentloaded")
             await asyncio.sleep(2)  # Wait for JS redirect
             
@@ -503,7 +520,6 @@ class GmxService:
             
             # On auth.gmx.net login page — step 1: fill email, click Weiter
             if "auth.gmx.net" in url or "login.gmx.net" in url:
-                await normalize_auth_prompt()
                 logger.info("Step 1: Filling email on auth.gmx.net")
                 # The email input has name=username, id=email
                 email_input = page.locator('input[id="email"], input[name="username"]').first
@@ -542,7 +558,7 @@ class GmxService:
                 if await login_btn.is_visible(timeout=3000):
                     await login_btn.click()
                     logger.info("Clicked Login")
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(5)
                 else:
                     btns = await page.query_selector_all('button')
                     for b in btns:
@@ -550,16 +566,11 @@ class GmxService:
                         if 'Login' == t:
                             await b.click()
                             logger.info("Clicked Login button")
-                            await asyncio.sleep(3)
+                            await asyncio.sleep(5)
                             break
                 
-                # Bug 5 fix: poll URL for up to 15s instead of fixed 5s wait
+                # Check result
                 url = page.url
-                for _poll in range(12):
-                    if "navigator.gmx.net" in url:
-                        break
-                    await asyncio.sleep(1)
-                    url = page.url
                 logger.info(f"After login, URL: {url[:80]}")
                 if "navigator.gmx.net/mail?sid=" in url:
                     logger.info("Login successful, got SID")
@@ -574,10 +585,11 @@ class GmxService:
             # Fallback: click Login button on homepage, then two-step auth
             logger.info("Homepage without login form — clicking Login button")
             try:
-                if await click_visible_button("Login"):
+                login_btn = page.locator('button:has-text("Login")').first
+                if await login_btn.is_visible(timeout=3000):
+                    await login_btn.click()
                     logger.info("Clicked Login button on homepage")
                     await asyncio.sleep(5)
-                    await normalize_auth_prompt()
                     url = page.url
                     logger.info(f"After login click: {url[:80]}")
                     
@@ -773,14 +785,53 @@ class GmxService:
             logger.info("Successfully navigated to allEmailAddresses (top frame)")
             return True
         
-        # Fallback: poll for allEmailAddresses frame
+        # Fallback 1: poll for allEmailAddresses frame
         logger.info("STEP 3: Polling for allEmailAddresses")
         for poll in range(15):
             if "allEmailAddresses" in page.url and "settings" in page.url:
                 return True
             await asyncio.sleep(1)
         
-        logger.error("allEmailAddresses not found")
+        # Fallback 2: session may be lost — try restore + re-login + navigate
+        logger.warning("allEmailAddresses not found — trying session restore + re-login")
+        await self._try_restore_session()
+        if not await self._login(page):
+            logger.error("Re-login failed after session restore")
+            return False
+        
+        # After re-login, get fresh SID and retry jump URL
+        sid_match = re.search(r'[?&]sid=([a-f0-9]{50,})', page.url)
+        if sid_match:
+            sid = sid_match.group(1)
+            logger.info(f"Got fresh SID after re-login: {sid[:20]}...")
+            jump_url = f"https://navigator.gmx.net/navigator/jump/to/mail_settings?sid={sid}"
+            await page.goto(jump_url, wait_until="domcontentloaded")
+            await asyncio.sleep(3)
+            if "allEmailAddresses" in page.url and "settings" in page.url:
+                logger.info("Successfully navigated after re-login")
+                return True
+            # If still on settings/signature, try JS click again
+            if "settings" in page.url and "3c.gmx.net" in page.url:
+                try:
+                    result = await page.evaluate("""(function() {
+                        var allEls = document.querySelectorAll('a, span, li, div, p');
+                        for (var i = 0; i < allEls.length; i++) {
+                            var el = allEls[i];
+                            if (el.children.length === 0 && el.textContent.trim() === 'E-Mail-Adressen') {
+                                el.click();
+                                return {clicked: true};
+                            }
+                        }
+                        return {clicked: false};
+                    })()""")
+                    if result.get("clicked"):
+                        await asyncio.sleep(4)
+                        if "allEmailAddresses" in page.url and "settings" in page.url:
+                            return True
+                except Exception:
+                    pass
+        
+        logger.error("allEmailAddresses not found — all fallbacks exhausted")
         return False
 
     # ── Alias Deletion ──────────────────────────────────────────────────
