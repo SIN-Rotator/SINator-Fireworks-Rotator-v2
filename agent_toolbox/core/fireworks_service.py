@@ -1217,10 +1217,40 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     from sin_browser_tools.tools.extraction import browser_console
     from sin_browser_tools.tools.vision import browser_get_text
 
-    await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
-    await asyncio.sleep(0.5)
+    API_KEYS_URL = "https://app.fireworks.ai/settings/users/api-keys"
 
-    for _ in range(3):
+    # Bug fix: navigate with retry + polling instead of single 30s timeout
+    navigated = False
+    for nav_attempt in range(3):
+        try:
+            await browser_navigate(API_KEYS_URL)
+            await asyncio.sleep(0.5)
+            url = (await browser_get_url())["url"]
+            if "api-keys" in url or "settings" in url:
+                navigated = True
+                break
+            logger.warning(f"Nav attempt {nav_attempt+1}: landed on {url[:60]} — retrying")
+        except Exception as e:
+            logger.warning(f"Nav attempt {nav_attempt+1} failed: {e} — retrying in 3s")
+            await asyncio.sleep(3)
+
+    if not navigated:
+        # Last resort: try via manager.page directly with longer timeout
+        try:
+            from sin_browser_tools.core import manager
+            await manager.page.goto(API_KEYS_URL, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(1)
+            url = (await browser_get_url())["url"]
+            if "api-keys" in url or "settings" in url:
+                navigated = True
+        except Exception as e:
+            logger.error(f"All navigation attempts failed: {e}")
+
+    if not navigated:
+        return {"status": "error", "error": "Could not navigate to API keys page after 3 attempts"}
+
+    # Poll for login redirect instead of fixed sleep
+    for _ in range(6):
         url = (await browser_get_url())["url"]
         if 'login' in url.lower():
             logger.warning(f"Redirected to login — retrying ({url[:60]})")
@@ -1228,8 +1258,11 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
                 await browser_press("Enter")
             except Exception:
                 pass
-            await asyncio.sleep(0.5)
-            await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
+            await asyncio.sleep(1)
+            try:
+                await browser_navigate(API_KEYS_URL)
+            except Exception:
+                pass
             await asyncio.sleep(0.5)
         else:
             break
@@ -1250,8 +1283,11 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
         except Exception:
             if attempt_try < 2:
                 logger.warning("Create API Key button not found — retry")
-                await browser_navigate("https://app.fireworks.ai/settings/users/api-keys")
-                await asyncio.sleep(1)
+                try:
+                    await browser_navigate(API_KEYS_URL)
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
                 continue
 
         try:
@@ -1284,8 +1320,8 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
                 except Exception:
                     continue
 
-        for _ in range(20):
-            await asyncio.sleep(0.2)
+        for _ in range(30):
+            await asyncio.sleep(0.5)
             text = (await browser_get_text("body")).get("text", "")
             keys = re.findall(r'fw_[a-zA-Z0-9]{20,}', text)
             if keys:
