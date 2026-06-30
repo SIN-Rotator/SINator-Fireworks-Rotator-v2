@@ -1097,7 +1097,7 @@ class GmxService:
             return False
 
     async def _click_add_button(self, page: Page) -> bool:
-        """Click the add alias button via CDP native events (Wicket-kompatibel)."""
+        """Click the add alias button via Playwright native click."""
         logger.info("[_click_add_button] Looking for add button")
         try:
             frame = await self._get_all_email_frame(page)
@@ -1105,42 +1105,12 @@ class GmxService:
                 logger.warning("allEmailAddresses iframe not found")
                 return False
 
-            # CDP native click via bounding box (Wicket-kompatibel)
+            # Playwright native click — triggers HTML form submit properly
             btn = frame.locator('button:has-text("Hinzufügen")').first
-            bb = await btn.bounding_box()
-            if bb:
-                cx = bb['x'] + bb['width'] / 2
-                cy = bb['y'] + bb['height'] / 2
-                cdp = await page.context.new_cdp_session(page)
-                await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": cx, "y": cy})
-                await asyncio.sleep(0.1)
-                await cdp.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": cx, "y": cy, "button": "left", "clickCount": 1})
-                await asyncio.sleep(0.1)
-                await cdp.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": cx, "y": cy, "button": "left", "clickCount": 1})
-                await asyncio.sleep(2)
-                logger.info("Hinzufügen button clicked via CDP")
-                try: await cdp.detach()
-                except: pass
-                return True
-
-            # Fallback: JS evaluate
-            result = await frame.evaluate("""(function() {
-                var btns = document.querySelectorAll('button');
-                for (var i = 0; i < btns.length; i++) {
-                    if (btns[i].textContent.indexOf('Hinzuf') >= 0) {
-                        btns[i].click();
-                        return true;
-                    }
-                }
-                return false;
-            })()""")
-            if result:
-                logger.info("Hinzufügen button clicked via JS")
-                await asyncio.sleep(2)
-                return True
-            
-            logger.warning("Add button not found")
-            return False
+            await btn.click(force=True, timeout=5000)
+            await asyncio.sleep(2)
+            logger.info("Hinzufügen button clicked via Playwright")
+            return True
         except Exception as e:
             logger.error(f"Error clicking add button: {e}")
             return False
