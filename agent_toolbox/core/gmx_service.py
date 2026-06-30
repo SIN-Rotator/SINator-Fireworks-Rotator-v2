@@ -899,7 +899,16 @@ class GmxService:
         return None
 
     async def _find_alias_row(self, page: Page) -> Optional[str]:
-        """Find a non-opensin alias email in the allEmailAddresses iframe."""
+        """Find a non-standard alias email in the allEmailAddresses iframe."""
+        import json, os
+        try:
+            cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '..', 'data', 'config.json')
+            with open(cfg_path) as cf:
+                cfg = json.load(cf)
+            own_email = cfg.get('gmx_email', '')
+        except Exception:
+            own_email = ''
+
         logger.info("[_find_alias_row] Searching for alias")
         try:
             frame = await self._get_all_email_frame(page)
@@ -908,15 +917,19 @@ class GmxService:
                 return None
             
             text = await frame.evaluate("() => document.body.innerText")
-            lines = text.split('\n')
-            for line in lines:
+            for line in text.split('\n'):
                 line = line.strip()
-                if '@gmx.' in line and 'jerosin@gmx.net' not in line and 'opensin@gmx.de' not in line:
-                    parts = line.split()
-                    for part in parts:
-                        if '@gmx.' in part and part != 'jerosin@gmx.net' and part != 'opensin@gmx.de':
-                            logger.info(f"Found alias: {part}")
-                            return part
+                if '@gmx.' not in line:
+                    continue
+                if own_email and own_email in line:
+                    continue
+                if 'jerosin@gmx.net' in line or 'opensin@gmx.de' in line:
+                    continue
+                parts = line.split()
+                for part in parts:
+                    if '@gmx.' in part and part != own_email and part != 'jerosin@gmx.net' and part != 'opensin@gmx.de':
+                        logger.info(f"Found alias: {part}")
+                        return part
         except Exception as e:
             logger.warning(f"Error finding alias: {e}")
         return None
