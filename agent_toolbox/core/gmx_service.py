@@ -1145,31 +1145,38 @@ class GmxService:
             logger.error(f"Error clicking add button: {e}")
             return False
 
-    async def _verify_alias(self, page: Page, alias_email: str, present: bool = True, max_wait: float = 12.0) -> bool:
-        """Verify alias is present/absent — searches iframe content (not top frame)."""
+    async def _verify_alias(self, page: Page, alias_email: str, present: bool = True, max_wait: float = 20.0) -> bool:
+        """Verify alias is present/absent — polls iframe content every 0.5s."""
         logger.info(f"[_verify_alias] Checking {alias_email} present={present}")
         try:
             deadline = time.time() + max_wait
             while time.time() < deadline:
                 frame = await self._get_all_email_frame(page)
                 if frame:
-                    text = await frame.evaluate("() => document.body.innerText")
-                    found = alias_email in text
-                    if present and found:
-                        return True
-                    if not present and not found:
-                        return True
+                    try:
+                        text = await frame.evaluate("() => document.body.innerText")
+                        found = alias_email in text
+                        if present and found:
+                            return True
+                        if not present and not found:
+                            return True
+                    except Exception:
+                        pass  # Frame might be reloading
                 else:
                     for f in page.frames:
                         if "allEmailAddresses" in f.url and "settings" in f.url:
-                            text = await f.evaluate("() => document.body.innerText")
-                            found = alias_email in text
-                            if present and found:
-                                return True
-                            if not present and not found:
-                                return True
+                            try:
+                                text = await f.evaluate("() => document.body.innerText")
+                                found = alias_email in text
+                                if present and found:
+                                    return True
+                                if not present and not found:
+                                    return True
+                            except Exception:
+                                pass
                             break
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)  # Faster poll: was 1s, now 0.5s
+            logger.warning(f"Verify timeout after {max_wait}s: {alias_email} present={present}")
             return False
         except Exception as e:
             logger.error(f"Error verifying alias: {e}")
@@ -1244,7 +1251,6 @@ class GmxService:
                 if await self._fill_alias_input(page, current_alias):
                     await asyncio.sleep(1)
                     if await self._click_add_button(page):
-                        await asyncio.sleep(3)
                         if await self._verify_alias(page, alias_email, present=True):
                             created_alias = alias_email
                             steps.append("created")
