@@ -1,73 +1,116 @@
-# SINator Fireworks Rotator v2 — V19.3 GMX Delete Fix
+# SINator Fireworks Rotator v2 — VM Key Generation
 
-[![GitNexus](https://img.shields.io/badge/GitNexus-knowledge%20graph-8B5CF6)](.gitnexus/)
+[![Python](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Playwright](https://img.shields.io/badge/Playwright-CDP-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
 
-**Standalone-Fork** des [SINator-FireworksAI](https://github.com/SIN-Rotator/SINator-FireworksAI) Haupt-Repos, der **ausschließlich den v19.3-gmx-delete-fixed Code** enthält. Wurde am 10. Juni 2026 erstellt, um den funktionierenden Rotation-Stand als eigenes Repo zu verewigen.
+**Aktiver Rotator** für den [SINator-FireworksAI](https://github.com/SIN-Rotator/SINator-FireworksAI) Key Pool. Läuft auf einer OCI VM (Oracle Cloud, ARM64) und generiert automatisch Fireworks API Keys via GMX Alias Rotation + Playwright Browser Automation.
 
-## ⚠️ Zweck dieses Repos
+## Architektur
 
-Dies ist **NICHT** die aktiv entwickelte Version. Für aktive Entwicklung benutze:
-- **Haupt-Repo (modern, mit 2 chirurgischen Fixes gepatched):** https://github.com/SIN-Rotator/SINator-FireworksAI
-- **Standalone-Test (dieses Repo, eingefroren):** https://github.com/SIN-Rotator/SINator-Fireworks-Rotator-v2
+```
+OCI VM (sin-supabase, 92.5.60.87)
+  |
+  ├── systemd timer (every 10min)
+  |     └── auto_keygen_vm.py
+  |           ├── check pool stats (sinator.delqhi.com)
+  |           └── if available < 5: rotate_vm.py 10
+  |
+  ├── rotate_vm.py N (batch generator)
+  |     └── rotate.py (single key, Playwright CDP)
+  |           ├── GMX login (Chrome CDP :9222)
+  |           ├── Alias rotation (delete old, create new)
+  |           ├── Fireworks signup (Bot Chrome)
+  |           ├── OTP polling (GMX inbox)
+  |           ├── Login + Onboarding
+  |           ├── API key extraction
+  |           └── Push to Mac backend (sinator.delqhi.com/api/v1/pool/add)
+  |
+  ├── Xvfb :99 (virtual display)
+  ├── Chromium CDP :9222 (Snap, --no-sandbox)
+  └── noVNC :6080 (manual login fallback)
+```
 
-## 🏷️ Immortal Tags (UNZERSTÖRBAR)
-
-| Tag | Status | Bedeutung |
-|-----|--------|-----------|
-| `v19.3-gmx-delete-fixed` | ✅ Pushed | Letzter Commit des originalen v19.3-Branches |
-| `v19.3-gmx-delete-fixed-working` | ✅ Pushed | **VERIFIED WORKING** — End-to-End-Test bestanden in 164.6s |
-
-## ✅ Verifizierter E2E-Flow (164.6s am 10. Juni 2026)
+## VM Setup
 
 ```bash
-python3 tools/rotate.py --gmx-email <EMAIL> --gmx-password <PW> --password <PW>
-# → GMX Login → Alias Delete (alt) → Alias Create (neu) → Fireworks Signup
-# → OTP aus GMX (CDP-AXTree) → Verify → Login → Onboarding → API Key → Pool Save
+# SSH
+ssh sin-supabase    # ubuntu@92.5.60.87
+
+# Services
+sudo systemctl status sinator-auto-rotator.timer
+sudo systemctl restart sinator-chromium
+sudo systemctl stop sinator-auto-rotator.timer   # before manual batch
+sudo systemctl start sinator-auto-rotator.timer   # resume auto
+
+# noVNC (manual GMX login)
+ssh -L 6080:localhost:6080 sin-supabase
+# → open http://localhost:6080/vnc.html
 ```
 
-**Test-Ergebnis:**
+## Key Generation
+
+### Automated (default)
+The systemd timer fires every 10min. If pool available < 5, it generates 10 keys.
+
+### Manual batch
+```bash
+ssh sin-supabase
+sudo rm -f /tmp/sinator-rotate.lock
+cd /opt/sinator-fireworks
+DISPLAY=:99 MAC_BACKEND_URL=https://sinator.delqhi.com \
+  .venv/bin/python3 -u tools/rotate_vm.py 20 2>&1
 ```
-ROTATION COMPLETE - 164.6s
-API Key: fw_HxidQ9fkpb2bzgSgDxAdVs
-Pool gespeichert: 243 Keys (242 → 243, +1 NEU)
-Neuer API-Key hinzugefügt: 97aafae9...
-Login OK: ['login_page', 'email_filled', 'password_filled', 
-           'form_submitted', 'onboarding_complete', 'login_success']
+
+### Single key (foreground, debug)
+```bash
+ssh sin-supabase "cd /opt/sinator-fireworks && DISPLAY=:99 \
+  MAC_BACKEND_URL=https://sinator.delqhi.com \
+  .venv/bin/python3 -u tools/rotate_vm.py 1 --debug 2>&1"
 ```
 
-## 🔧 Die kritischen Fixes in diesem Repo
+## Performance (v2.0 polling optimization)
 
-### Fix 1: `_delete_alias` in `agent_toolbox/core/gmx_service.py`
-- **Problem:** Playwright's `row.hover()` triggert Wicket `:hover` CSS nicht zuverlässig
-- **Lösung:** `page.mouse.move(0,0) → page.mouse.move(cx,cy)` Pattern + 3x retry
-- **Selector:** GMX nutzt `<div class="table_body-row table_row">`, NICHT `<tr>`/`<li>` (kleinste BBox-Strategie)
-- **Delete-Icon:** `a.table-hover_icon[title*="löschen"]` mit Fallback auf alle `<a>` mit "lösch" im title
+All fixed `asyncio.sleep()` calls replaced with responsive polling (0.2-0.3s intervals).
 
-### Fix 2: Multi-Tab Architektur
-- `work_tab` (Alias/Fireworks) + `inbox_tab` (OTP) — isolation
-- Browser stays single process, but logical separation
+| Metric | Before | After |
+|--------|--------|-------|
+| Time per key | 137-170s | ~80-100s |
+| Onboarding poll | 5s intervals | 1s intervals |
+| Login redirect | Fixed 5s sleep | Poll URL change 0.3s |
+| Create API Key | Fixed 0.3s sleep | Poll for input element 0.2s |
+| Between-key delay | 15s | 5s |
 
-### Fix 3: CDP-AXTree OTP-Extraktion
-- `Accessibility.getFullAXTree` mit `pierce: True`
-- Durchdringt OOPIFs und Shadow DOM
-- Bulletproof gegen 60+ Ad-Frames
+## Crash Recovery
 
-## ⚠️ Bekannte Probleme (vom Original v19.3)
+| Problem | Fix |
+|--------|-----|
+| Stale lock file after reboot | `ExecStartPre` cleans `/tmp/sinator-rotate.lock` |
+| Lock permission (root vs ubuntu) | `chmod 0666` on lock files |
+| GMX account blocked | 60s login cooldown + noVNC manual login |
+| GMX session lost | Hourly cron backup + `restore_gmx_session.sh` |
+| Concurrent runs | `fcntl.flock` prevents, no `ExecStartPre` in auto-rotator |
 
-- 5 Bugs in Onboarding-Flow (alle V19.2 gefixt): Account-ID-Überschreiben, Carousel-Klick, Cookie-Banner, Wait-Time, os-Import
-- OTP-Verzögerung: bis zu 180s (Polling 25×8s)
-- Account-Suspension: $5-Credits aufgebraucht = suspended
+## Key Files
 
-## 🔗 Verwandte Repos
+| File | Purpose |
+|------|---------|
+| `tools/rotate_vm.py` | Batch key generation (N keys, lock-protected) |
+| `tools/rotate.py` | Single key generation (Playwright CDP) |
+| `tools/auto_keygen_vm.py` | Auto-keygen: check pool → generate if low |
+| `tools/backup_gmx_session.sh` | Backup Snap Chromium cookies (hourly cron) |
+| `tools/restore_gmx_session.sh` | Restore GMX session from backup |
+| `agent_toolbox/core/gmx_service.py` | GMX login, alias rotation, OTP polling |
+| `agent_toolbox/core/fireworks_service.py` | Fireworks signup, login, onboarding, API key |
+| `/opt/data/config.json` | GMX email/password + Fireworks password |
 
-| Repo | GitHub | Funktion |
-|------|--------|----------|
-| **SINator-FireworksAI** (Haupt) | [SIN-Rotator/SINator-FireworksAI](https://github.com/SIN-Rotator/SINator-FireworksAI) | Modern + 2 chirurgische Fixes gepatched (gmx delete + consent redirect) |
-| **SINator-FireworksRotator-v2** (dieses) | [SIN-Rotator/SINator-Fireworks-Rotator-v2](https://github.com/SIN-Rotator/SINator-Fireworks-Rotator-v2) | Standalone-Test, eingefroren auf v19.3-gmx-delete-fixed |
-| **SINator-dashboard** | [SIN-Rotator/SINator-dashboard](https://github.com/SIN-Rotator/SINator-dashboard) | Tauri Dashboard + Setup |
-| **OpenCode Config** | [OpenSIN-Code/SIN-Code-FireworksAI-OpenCode-Config](https://github.com/OpenSIN-Code/SIN-Code-FireworksAI-OpenCode-Config) | opencode.json mit 12 Modellen |
-| **Hermes Bundle** | [SIN-Hermes-Bundles/SIN-Hermes-Provider-Bundle](https://github.com/SIN-Hermes-Bundles/SIN-Hermes-Provider-Bundle) | Hermes Provider Config |
+## Related Repos
 
----
+| Repo | Function |
+|------|----------|
+| **SINator-FireworksAI** (Mac) | Key pool + proxy + backend |
+| **SINator-Fireworks-Rotator-v2** (this, VM) | Key generation via Playwright |
+| [SINator-dashboard](https://github.com/SIN-Rotator/SINator-dashboard) | Tauri dashboard |
 
-*Stand: 2026-06-10 | Tag v19.3-gmx-delete-fixed-working | Verifiziert: 164.6s E2E | Standalone-Fork (NICHT aktiv entwickelt)*
+## License
+
+MIT
