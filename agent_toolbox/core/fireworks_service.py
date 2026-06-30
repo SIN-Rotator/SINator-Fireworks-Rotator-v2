@@ -267,33 +267,30 @@ async def _dismiss_cookie_consent() -> None:
     The init_script in launch() sets localStorage consent + CSS hiding + MutationObserver
     to PREVENT the banner. This function is the reactive fallback that removes any
     banner that slipped through (e.g. if CookieYes ignores localStorage).
+    
+    A 3-second polling loop catches late-appearing banners (setTimeout-based injection).
     """
     from sin_browser_tools.tools.interaction import browser_click_by_text
     from sin_browser_tools.tools.extraction import browser_console
 
-    # 1. Try clicking "Reject All" (cleanest — sets CookieYes consent properly)
-    try:
-        await browser_click_by_text("Reject All", role="button")
-        await asyncio.sleep(0.5)
-        logger.info("Cookie banner: 'Reject All' clicked")
-    except Exception:
-        pass
+    for poll in range(6):  # 3s total, 0.5s intervals
+        # 1. Try clicking "Reject All" (cleanest — sets CookieYes consent properly)
+        try:
+            await browser_click_by_text("Reject All", role="button")
+            logger.info("Cookie banner: 'Reject All' clicked")
+        except Exception:
+            pass
 
-    # 2. Nuke all known consent DOM elements via JS
-    await browser_console("""(() => {
-        // CookieYes (cky-*)
-        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
-        // OneTrust
-        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
-        // Generic consent containers
-        document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
-        // Iframe-based banners
-        document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
-        // Restore scroll
-        document.body.style.overflow = 'visible';
-        document.documentElement.style.overflow = 'visible';
-    })()""")
-    await asyncio.sleep(0.3)
+        # 2. Nuke all known consent DOM elements via JS
+        await browser_console("""(() => {
+            document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
+            document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
+            document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
+            document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
+            document.body.style.overflow = 'visible';
+            document.documentElement.style.overflow = 'visible';
+        })()""")
+        await asyncio.sleep(0.5)
 
 
 async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]:
