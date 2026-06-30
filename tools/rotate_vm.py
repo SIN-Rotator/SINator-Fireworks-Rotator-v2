@@ -196,7 +196,7 @@ def main():
                 logger.error(f"Key {i} failed: {e}")
                 failed += 1
             if i < count:
-                time.sleep(15)  # Bug 6 fix: 15s delay to avoid GMX rate limiting
+                time.sleep(5)  # Reduced from 15s — 5s is enough between keys
     finally:
         release_lock()
 

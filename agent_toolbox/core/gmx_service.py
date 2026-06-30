@@ -89,6 +89,57 @@ class GmxService:
             logger.warning(f"Session restore failed: {e}")
         return False
 
+
+    async def _gmx_poll_for_url_contains(self, page, keyword: str, timeout: float = 8.0, interval: float = 0.3) -> bool:
+        """Poll until page URL contains keyword. Returns True if found, False on timeout."""
+        elapsed = 0.0
+        while elapsed < timeout:
+            url = page.url or ""
+            if keyword in url.lower():
+                return True
+            await asyncio.sleep(interval)
+            elapsed += interval
+        return False
+
+    async def _gmx_poll_for_sid(self, page, timeout: float = 10.0, interval: float = 0.3) -> bool:
+        """Poll until page URL contains sid= parameter."""
+        elapsed = 0.0
+        while elapsed < timeout:
+            if re.search(r'[?&]sid=[a-f0-9]{40,}', page.url or ""):
+                return True
+            await asyncio.sleep(interval)
+            elapsed += interval
+        return False
+
+    async def _gmx_poll_for_element(self, page, selector: str, timeout: float = 8.0, interval: float = 0.3) -> bool:
+        """Poll until DOM element exists."""
+        elapsed = 0.0
+        while elapsed < timeout:
+            try:
+                count = await page.evaluate(f"document.querySelectorAll('{selector}').length")
+                if count and count > 0:
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(interval)
+            elapsed += interval
+        return False
+
+    async def _gmx_poll_for_text(self, page, text: str, timeout: float = 8.0, interval: float = 0.3) -> bool:
+        """Poll until page body contains text."""
+        elapsed = 0.0
+        while elapsed < timeout:
+            try:
+                body = await page.evaluate("() => document.body ? document.body.innerText : ''")
+                if body and text.lower() in body.lower():
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(interval)
+            elapsed += interval
+        return False
+
+
     def generate_alias_name(self) -> str:
         adj = random.choice(self.adjectives)
         noun = random.choice(self.nouns)
@@ -169,14 +220,14 @@ class GmxService:
                             logger.warning(f"[CDP-AXTree] GMX Session/Loading-Seite erkannt (nodes={len(nodes)}, inbox={is_on_inbox}, url={current_url[:60]}) — lade neu...")
                             try:
                                 await self.inbox_tab.reload(wait_until="domcontentloaded", timeout=15000)
-                                await asyncio.sleep(5)
+                                await asyncio.sleep(1)  # brief settle
                                 logger.info("[CDP-AXTree] Page reloaded, continue polling")
                                 continue
                             except Exception as reload_err:
                                 logger.warning(f"[CDP-AXTree] Reload failed: {reload_err}")
                                 try:
                                     await self.inbox_tab.goto(current_url, wait_until="domcontentloaded", timeout=15000)
-                                    await asyncio.sleep(5)
+                                    await asyncio.sleep(1)
                                 except Exception:
                                     pass
                                 continue
@@ -227,7 +278,7 @@ class GmxService:
 
                 except Exception as e:
                     logger.warning(f"[CDP-AXTree] Scan error: {e}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)  # brief retry
 
             logger.warning("[CDP-AXTree] Timeout")
             return {"status": "not_found", "otp_url": None, "otp_code": None, "error": "Timeout"}
@@ -319,7 +370,7 @@ class GmxService:
 
             # 1. Navigate to inbox
             await self._goto_postfach(self.inbox_tab)
-            await asyncio.sleep(5)
+            await self._gmx_poll_for_sid(self.inbox_tab, timeout=10, interval=0.3)
 
             # 2. Get mail frame
             mail_frame = None
@@ -346,7 +397,7 @@ class GmxService:
                 items = items.get('result', [])
                 if items:
                     break
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)  # OTP poll interval
 
             if not items:
                 return {"status": "not_found", "otp_url": None, "otp_code": None, "error": "no Fireworks email found"}
@@ -390,7 +441,7 @@ class GmxService:
         zum = page.get_by_text("Zum Postfach").first
         if await zum.is_visible():
             await zum.click()
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
 
 # ── Playwright Connection ────────────────────────────────────────────
 
@@ -496,7 +547,7 @@ class GmxService:
                     postfach_link = page.locator('text=Zum Postfach').first
                     if await postfach_link.is_visible(timeout=3000):
                         await postfach_link.click()
-                        await asyncio.sleep(5)
+                        await self._gmx_poll_for_sid(page, timeout=10, interval=0.3)
                         logger.info(f"Postfach URL: {page.url[:80]}")
                         if "navigator.gmx.net/mail?sid=" in page.url:
                             return True
@@ -509,7 +560,7 @@ class GmxService:
                 # Try direct navigation to inbox
                 logger.info("Trying direct navigator.gmx.net/mail")
                 await page.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
-                await asyncio.sleep(5)
+                await self._gmx_poll_for_sid(page, timeout=10, interval=0.3)
                 if "navigator.gmx.net/mail?sid=" in page.url:
                     return True
                 if "navigator.gmx.net" in page.url:
@@ -533,7 +584,7 @@ class GmxService:
                 if await weiter_btn.is_visible(timeout=3000):
                     await weiter_btn.click()
                     logger.info("Clicked Weiter")
-                    await asyncio.sleep(4)
+                    await self._gmx_poll_for_element(page, 'input[type="password"]', timeout=8, interval=0.3)
                 else:
                     # Fallback: find any button with "Weiter"
                     btns = await page.query_selector_all('button')
@@ -542,7 +593,7 @@ class GmxService:
                         if 'Weiter' in t:
                             await b.click()
                             logger.info(f"Clicked button: {t}")
-                            await asyncio.sleep(4)
+                            await asyncio.sleep(1)
                             break
                 
                 # Step 2: fill password, click Login
@@ -558,7 +609,7 @@ class GmxService:
                 if await login_btn.is_visible(timeout=3000):
                     await login_btn.click()
                     logger.info("Clicked Login")
-                    await asyncio.sleep(5)
+                    await self._gmx_poll_for_url_contains(page, "auth.gmx.net", timeout=8, interval=0.3)
                 else:
                     btns = await page.query_selector_all('button')
                     for b in btns:
@@ -566,7 +617,7 @@ class GmxService:
                         if 'Login' == t:
                             await b.click()
                             logger.info("Clicked Login button")
-                            await asyncio.sleep(5)
+                            await self._gmx_poll_for_url_contains(page, "auth.gmx.net", timeout=8, interval=0.3)
                             break
                 
                 # Check result
@@ -589,7 +640,7 @@ class GmxService:
                 if await login_btn.is_visible(timeout=3000):
                     await login_btn.click()
                     logger.info("Clicked Login button on homepage")
-                    await asyncio.sleep(5)
+                    await self._gmx_poll_for_url_contains(page, "auth.gmx.net", timeout=8, interval=0.3)
                     url = page.url
                     logger.info(f"After login click: {url[:80]}")
                     
@@ -606,7 +657,7 @@ class GmxService:
                         if await weiter_btn.is_visible(timeout=3000):
                             await weiter_btn.click()
                             logger.info("Clicked Weiter")
-                            await asyncio.sleep(4)
+                            await asyncio.sleep(1)
                         
                         # If prompt=none, replace with prompt=login via JS
                         if "prompt=none" in page.url:
@@ -629,7 +680,7 @@ class GmxService:
                         if await login_btn.is_visible(timeout=3000):
                             await login_btn.click()
                             logger.info("Clicked Login")
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(1)
                         
                         url = page.url
                         logger.info(f"After login: {url[:80]}")
@@ -660,7 +711,7 @@ class GmxService:
             submit_btn = page.locator('button[type="submit"]').first
             if await submit_btn.is_visible(timeout=3000):
                 await submit_btn.click()
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
             
             url = page.url
             logger.info(f"Legacy login result URL: {url[:80]}")
@@ -738,7 +789,7 @@ class GmxService:
         jump_url = f"https://navigator.gmx.net/navigator/jump/to/mail_settings?sid={sid}"
         logger.info(f"STEP 1: Navigating to jump URL")
         await page.goto(jump_url, wait_until="domcontentloaded")
-        await asyncio.sleep(3)
+        await self._gmx_poll_for_url_contains(page, "3c.gmx.net", timeout=8, interval=0.3)
         
         url = page.url
         logger.info(f"After jump: {url[:100]}")
@@ -772,7 +823,7 @@ class GmxService:
                 })()""")
                 if result.get("clicked"):
                     logger.info("E-Mail-Adressen clicked via JS dispatchEvent")
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(1)
                 else:
                     logger.warning("E-Mail-Adressen element not found on settings page")
             except Exception as e:
@@ -825,7 +876,7 @@ class GmxService:
                         return {clicked: false};
                     })()""")
                     if result.get("clicked"):
-                        await asyncio.sleep(4)
+                        await asyncio.sleep(1)
                         if "allEmailAddresses" in page.url and "settings" in page.url:
                             return True
                 except Exception:
@@ -1252,7 +1303,7 @@ class GmxService:
                 sid = sid.group(1) if sid else None
             if not sid:
                 await client.navigate(session_id, "https://www.gmx.net/")
-                await asyncio.sleep(4)
+                await asyncio.sleep(1)
                 body = await client.evaluate(session_id, "document.body.innerText")
                 text = body.get("result", {}).get("value", "")
                 if "Sie sind eingeloggt" not in text and "Zum Postfach" not in text:
@@ -1265,7 +1316,7 @@ class GmxService:
                     return false;
                 })()
                 """, return_by_value=True)
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
                 url_result = await client.evaluate(session_id, "window.location.href")
                 current_url = url_result.get("result", {}).get("value", "")
                 sid = re.search(r'[?&]sid=([^&]+)', current_url)
@@ -1274,7 +1325,7 @@ class GmxService:
                 return {"status": "error", "otp_url": None, "error": "Kein SID"}
             mail_url = f"https://bap.navigator.gmx.net/mail?sid={sid}"
             await client.navigate(session_id, mail_url)
-            await asyncio.sleep(6)
+            await asyncio.sleep(1)
             iframe_result = await client.evaluate(session_id, """
             (function() {
                 var iframe = document.querySelector('#thirdPartyFrame_mail');
@@ -1285,7 +1336,7 @@ class GmxService:
             if not iframe_src:
                 return {"status": "error", "otp_url": None, "error": "Mail iframe nicht gefunden"}
             await client.navigate(session_id, iframe_src)
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
             cookies_res = await client.send_to_session(session_id, "Network.getAllCookies")
             jsessionid = None
             for c in cookies_res.get("cookies", []):
@@ -1362,7 +1413,7 @@ class GmxService:
                                     await client.send_to_session(session_id, "Input.dispatchMouseEvent", {"type": "mousePressed", "x": cx, "y": cy, "button": "left", "clickCount": 1})
                                     await asyncio.sleep(0.15)
                                     await client.send_to_session(session_id, "Input.dispatchMouseEvent", {"type": "mouseReleased", "x": cx, "y": cy, "button": "left", "clickCount": 1})
-                                    await asyncio.sleep(5)
+                                    await asyncio.sleep(1)
                                     after = await client.get_targets()
                                     for t in after:
                                         tu = t.get("url", "")
@@ -1417,7 +1468,7 @@ class GmxService:
                     pw_page = await browser.new_page()
                     own_page = True
                 await pw_page.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
 
                 body = await pw_page.evaluate("() => document.body.innerText")
                 if "Nicht eingeloggt" in body or ("anmelden" in body.lower()[:300] and "E-Mail" not in body):

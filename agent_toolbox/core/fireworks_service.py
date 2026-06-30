@@ -1209,7 +1209,7 @@ async def _playwright_onboarding() -> None:
 
     # Final long wait: poll every 5s, max 60s
     for _ in range(12):
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
             logger.info(f"Onboarding redirect: {url[:60]}")

@@ -115,7 +115,7 @@ async def main():
         else:
             # Try navigator.gmx.net/mail to check if session cookies are still valid
             await work_tab.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
             if "navigator.gmx.net/mail" in work_tab.url and "login" not in work_tab.url.lower():
                 logger.info("GMX session active via cookie persistence")
                 logged_in = True
@@ -123,8 +123,8 @@ async def main():
                 logger.info("GMX login required — attempting login (up to 2 retries)")
                 for login_attempt in range(2):
                     if login_attempt > 0:
-                        logger.info(f"Login retry {login_attempt + 1}/2 — waiting 10s before retry")
-                        await asyncio.sleep(10)
+                        logger.info(f"Login retry {login_attempt + 1}/2 — waiting 5s before retry")
+                        await asyncio.sleep(5)
                     logged_in = await gmx._login(work_tab, email=args.gmx_email, password=args.gmx_password)
                     if logged_in:
                         logger.info(f"GMX login succeeded on attempt {login_attempt + 1}")
@@ -181,7 +181,7 @@ async def main():
         await asyncio.sleep(1)
         # Refresh once so the verify email from the Fireworks signup shows up
         await work_tab.reload(wait_until="domcontentloaded")
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
         verify_ok = False
         otp_url = None
