@@ -877,7 +877,6 @@ class GmxService:
                     })()""")
                     if result.get("clicked"):
                         await asyncio.sleep(1)
-                        await asyncio.sleep(4)
                         if "allEmailAddresses" in page.url and "settings" in page.url:
                             return True
                 except Exception:
