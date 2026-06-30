@@ -273,24 +273,26 @@ async def _dismiss_cookie_consent() -> None:
     from sin_browser_tools.tools.interaction import browser_click_by_text
     from sin_browser_tools.tools.extraction import browser_console
 
-    for poll in range(6):  # 3s total, 0.5s intervals
-        # 1. Try clicking "Reject All" (cleanest — sets CookieYes consent properly)
-        try:
-            await browser_click_by_text("Reject All", role="button")
-            logger.info("Cookie banner: 'Reject All' clicked")
-        except Exception:
-            pass
-
-        # 2. Nuke all known consent DOM elements via JS
-        await browser_console("""(() => {
-            document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
-            document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
-            document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
-            document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
-            document.body.style.overflow = 'visible';
-            document.documentElement.style.overflow = 'visible';
-        })()""")
-        await asyncio.sleep(0.5)
+    # 1. Nuke all consent DOM elements immediately (no waiting)
+    await browser_console("""(() => {
+        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
+        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
+        document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
+        document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
+        document.body.style.overflow = 'visible';
+        document.documentElement.style.overflow = 'visible';
+    })()""")
+    # 2. Try clicking "Reject All" if banner survived nuke
+    try:
+        await browser_click_by_text("Reject All", role="button")
+        logger.info("Cookie banner: 'Reject All' clicked")
+    except Exception:
+        pass
+    # 3. One quick re-nuke after 0.3s for late-injected banners
+    await asyncio.sleep(0.3)
+    await browser_console("""(() => {
+        document.querySelectorAll('[class*="cky-"],[class*="consent"],[class*="cookie-banner"]').forEach(e => e.remove());
+    })()""")
 
 
 async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]:

@@ -1217,7 +1217,7 @@ class GmxService:
                     deleted_alias = alias_email
                     steps.append("deleted")
                     # Don't reload — it breaks session. Just wait for DOM to settle.
-                    await asyncio.sleep(6)
+                    await asyncio.sleep(3)
                 else:
                     logger.warning("Failed to delete alias, continuing")
             else:
@@ -1238,7 +1238,7 @@ class GmxService:
                             created_alias = alias_email
                             steps.append("created")
                             break
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
 
             if created_alias:
                 return {"status": "success", "deleted_alias": deleted_alias, "created_alias": created_alias,
