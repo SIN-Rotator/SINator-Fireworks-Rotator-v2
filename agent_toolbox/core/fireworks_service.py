@@ -1324,29 +1324,39 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     await _dismiss_cookie_consent()
 
     for attempt_try in range(3):
+        await _dismiss_cookie_consent()
         try:
             await browser_click_by_text("Create API Key", role="button")
-            # No fixed sleep — poll for dialog input below
         except Exception:
             if attempt_try < 2:
-                logger.warning("Create API Key button not found — retry")
+                logger.warning(f"Create API Key button not found — retry {attempt_try+1}/3")
                 try:
                     await browser_navigate(API_KEYS_URL)
                     await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
+                    await _dismiss_cookie_consent()
                 except Exception:
                     pass
                 continue
 
+        # Click "API Key" menu item if dropdown appeared
+        await asyncio.sleep(1)
         try:
             await browser_click_by_text("API Key", role="menuitem")
         except Exception:
             pass
 
-        # Poll for dialog input to appear (replaces fixed sleep)
-        if await _poll_for_element('input[name="name"]', timeout=5, interval=0.2):
+        # Poll for dialog input — 10s timeout (was 5s, too short for React)
+        if await _poll_for_element('input[name="name"]', timeout=10, interval=0.3):
             break
+        logger.warning(f"Dialog not appearing — retry {attempt_try+1}/3")
+        if attempt_try < 2:
+            try:
+                await browser_navigate(API_KEYS_URL)
+                await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
+            except Exception:
+                pass
     else:
-        logger.error("API Key dialog never appeared")
+        logger.error("API Key dialog never appeared after 3 attempts")
         return {"status": "error", "error": "Dialog not found"}
 
     for retry in range(3):
