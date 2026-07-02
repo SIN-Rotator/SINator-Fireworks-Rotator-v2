@@ -921,8 +921,10 @@ async def _playwright_onboarding() -> None:
     await asyncio.sleep(0.5)
 
     # ── Step 5: Use-case checkboxes (Page 2) ─────────────────────────────────
-    # Use Playwright locator API for proper React synthetic event dispatch.
-    # JS input.click() alone doesn't trigger React onChange for custom checkboxes.
+    # ROOT CAUSE: Custom React checkboxes. DOM click() sets checked=True on the
+    # DOM element, but React's internal form state stays empty → POST /onboarding
+    # sends body={}. Fix: Find React fiber on each checkbox, call onClick prop
+    # directly with synthetic event. This is the ONLY way to update React state.
     use_cases = [
         "Prototype with open models",
         "Flexible capacity for experimentation",
@@ -932,19 +934,61 @@ async def _playwright_onboarding() -> None:
     ]
     for uc in use_cases:
         clicked = False
-        # Strategy 1: Playwright locator (best for React synthetic events)
+        # Strategy 1: React fiber onClick (guaranteed to update React state)
         try:
-            from sin_browser_tools.core import manager
-            page = manager.page
-            # Try multiple selector strategies
-            loc = page.locator(f'label:has-text("{uc}")').first
-            if await loc.count() > 0:
-                await loc.click(force=True, timeout=3000)
-                logger.info(f"Use-case '{uc}' clicked via Playwright label locator")
+            fiber_result = await browser_console(f"""(() => {{
+                // Find the label/div containing this text
+                var allEls = document.querySelectorAll('label, [role="checkbox"], div, span, p');
+                for (var i=0; i<allEls.length; i++) {{
+                    var txt = (allEls[i].textContent || '').trim();
+                    if (txt === {uc!r} || (txt.length < 60 && txt.indexOf({uc!r}) !== -1 && txt.indexOf('Credit') === -1)) {{
+                        // Find React fiber
+                        var fiberKey = Object.keys(allEls[i]).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                        if (fiberKey) {{
+                            var fiber = allEls[i][fiberKey];
+                            // Walk up to find onClick or onChange prop
+                            var curr = fiber;
+                            for (var hop=0; hop<20 && curr; hop++) {{
+                                if (curr.memoizedProps) {{
+                                    if (typeof curr.memoizedProps.onClick === 'function') {{
+                                        curr.memoizedProps.onClick({{preventDefault:function(){{}},stopPropagation:function(){{}},target:allEls[i]}});
+                                        return 'fiber_onclick hop=' + hop;
+                                    }}
+                                    if (typeof curr.memoizedProps.onChange === 'function') {{
+                                        curr.memoizedProps.onChange({{preventDefault:function(){{}},stopPropagation:function(){{}},target:allEls[i]}});
+                                        return 'fiber_onchange hop=' + hop;
+                                    }}
+                                }}
+                                curr = curr.return;
+                            }}
+                            return 'no_handler_in_fiber';
+                        }}
+                        return 'no_fiber_key';
+                    }}
+                }}
+                return 'element_not_found';
+            }})()""")
+            r = fiber_result.get("result", "") if isinstance(fiber_result, dict) else str(fiber_result)
+            if r and r.startswith("fiber_"):
+                logger.info(f"Use-case '{uc}' clicked via React fiber ({r})")
                 clicked = True
+            else:
+                logger.info(f"Use-case '{uc}' fiber attempt: {r}")
         except Exception as e:
-            logger.info(f"Playwright label click for '{uc}': {e}")
-        # Strategy 2: JS click as fallback
+            logger.info(f"Use-case '{uc}' fiber error: {e}")
+        # Strategy 2: Playwright label click (may help if fiber doesn't have handler)
+        if not clicked:
+            try:
+                from sin_browser_tools.core import manager
+                page = manager.page
+                loc = page.locator(f'label:has-text("{uc}")').first
+                if await loc.count() > 0:
+                    await loc.click(force=True, timeout=3000)
+                    logger.info(f"Use-case '{uc}' clicked via Playwright label locator")
+                    clicked = True
+            except Exception as e:
+                logger.info(f"Playwright label click for '{uc}': {e}")
+        # Strategy 3: JS click as last resort
         if not clicked:
             if not await _click_checkbox_any_strategy(uc):
                 logger.warning(f"Use-case '{uc}' not found via any strategy")
@@ -1153,8 +1197,12 @@ async def _playwright_onboarding() -> None:
                     }
                     return rechecked;
                 })()""")
-                if unchecked and unchecked.get("result", 0) > 0:
-                    logger.info(f"Re-checked {unchecked.get('result')} unchecked use-case checkboxes")
+                rechecked_count = 0
+                if isinstance(unchecked, dict):
+                    r = unchecked.get("result", 0)
+                    rechecked_count = int(r) if isinstance(r, (int, str)) and str(r).isdigit() else 0
+                if rechecked_count > 0:
+                    logger.info(f"Re-checked {rechecked_count} unchecked use-case checkboxes")
                     await asyncio.sleep(0.3)
             except Exception as e:
                 logger.warning(f"Re-check checkboxes failed: {e}")
