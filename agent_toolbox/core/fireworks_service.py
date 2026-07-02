@@ -977,48 +977,49 @@ async def _playwright_onboarding() -> None:
         except Exception:
             continue
 
-    # ALWAYS also do JS direct click — prioritize "Submit to get $5 Credits" (triggers API)
-    logger.info("Also doing JS direct click on Submit button")
-    js_result = await browser_console("""(() => {
-        var b = document.querySelectorAll('button');
-        // Try to find and call React onClick handler directly
-        for (var i=0; i<b.length; i++) {
-            var t = (b[i].textContent || '').trim();
-            if (t === 'Submit to get $5 Credits' || t === 'Submit' || t === 'Skip') {
-                // Method 1: Find React props and call onClick directly
-                var propKey = Object.keys(b[i]).find(k => k.startsWith('__reactProps'));
-                if (propKey && b[i][propKey] && b[i][propKey].onClick) {
-                    try {
-                        b[i][propKey].onClick({preventDefault: function(){}, stopPropagation: function(){}});
-                        return 'react_onclick: ' + t;
-                    } catch(e) {
-                        // Method 2: Standard click + dispatchEvent
-                        b[i].click();
-                        b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                        return 'fallback_click: ' + t + ' (react error: ' + e.message + ')';
+    # JS direct click — ONLY if browser_click_by_text didn't work
+    if not submit_clicked:
+        logger.info("Submit not clicked yet — trying JS direct click on Submit button")
+        js_result = await browser_console("""(() => {
+            var b = document.querySelectorAll('button');
+            for (var i=0; i<b.length; i++) {
+                var t = (b[i].textContent || '').trim();
+                // Match "Submit to get $6 Credits" OR "Submit to get $5 Credits" OR exact "Submit"
+                // NEVER match "Skip" — Skip cancels the onboarding!
+                if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
+                    var propKey = Object.keys(b[i]).find(k => k.startsWith('__reactProps'));
+                    if (propKey && b[i][propKey] && b[i][propKey].onClick) {
+                        try {
+                            b[i][propKey].onClick({preventDefault: function(){}, stopPropagation: function(){}});
+                            return 'react_onclick: ' + t;
+                        } catch(e) {
+                            b[i].click();
+                            b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                            return 'fallback_click: ' + t;
+                        }
                     }
+                    b[i].click();
+                    b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                    return 'dom_click: ' + t;
                 }
-                // Method 2: Standard click + dispatchEvent
-                b[i].click();
-                b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                return 'dom_click: ' + t;
             }
-        }
-        return 'no_button';
-    })()""")
-    logger.info(f"JS Skip click result: {js_result}")
+            return 'no_submit_button';
+        })()""")
+        logger.info(f"JS Submit click result: {js_result}")
+    else:
+        logger.info("Submit already clicked via browser_click_by_text — skipping JS fallback")
 
-    # Also try Playwright page.click() with force=True (bypasses actionability)
-    try:
-        from sin_browser_tools.core import manager
-        page = manager.page
-        # Find Skip button via Playwright selector
-        skip_btn = page.locator('button:has-text("Submit to get $5 Credits")')
-        if await skip_btn.count() > 0:
-            await skip_btn.first.click(force=True, timeout=5000)
-            logger.info("Playwright force-click on Submit button succeeded")
-    except Exception as e:
-        logger.info(f"Playwright force-click on Submit: {e}")
+    # Also try Playwright page.click() with force=True — only if not yet clicked
+    if not submit_clicked:
+        try:
+            from sin_browser_tools.core import manager
+            page = manager.page
+            submit_btn = page.locator('button:has-text("Submit to get $6 Credits"), button:has-text("Submit to get $5 Credits")')
+            if await submit_btn.count() > 0:
+                await submit_btn.first.click(force=True, timeout=5000)
+                logger.info("Playwright force-click on Submit button succeeded")
+        except Exception as e:
+            logger.info(f"Playwright force-click on Submit: {e}")
 
     # Poll every 1s for onboarding redirect (max 60s)
     for attempt in range(60):

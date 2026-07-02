@@ -47,7 +47,7 @@ class GmxService:
         self.inbox_tab: Optional[Page] = None
         self.work_tab: Optional[Page] = None
         self._last_login_attempt: float = 0.0
-        self._login_cooldown: float = 60.0  # min 60s between login attempts
+        self._login_cooldown: float = 0.0  # disabled for local testing
         self.adjectives = [
             "elron", "dark", "swift", "iron", "silver", "golden", "crystal", "shadow",
             "storm", "frost", "blaze", "thunder", "cosmic", "neon", "cyber", "quantum",
@@ -646,27 +646,28 @@ class GmxService:
                     
                     if "auth.gmx.net" in url or "login.gmx.net" in url:
                         logger.info("On login page after clicking Login")
+                        
+                        # CRITICAL: prompt=none hides the login form entirely.
+                        # Must reload with prompt=login BEFORE trying to fill anything.
+                        if "prompt=none" in page.url:
+                            logger.info("prompt=none detected — reloading with prompt=login")
+                            new_url = page.url.replace("prompt=none", "prompt=login")
+                            await page.goto(new_url, wait_until="domcontentloaded")
+                            await asyncio.sleep(1)
+                        
                         # Fill email (step 1)
                         email_input = page.locator('input[id="email"], input[name="username"]').first
                         if await email_input.is_visible(timeout=5000):
                             await email_input.fill(email)
                             logger.info("Email filled")
+                        else:
+                            logger.warning("Email field not visible after prompt fix")
                         
                         await asyncio.sleep(0.5)
                         weiter_btn = page.locator('button:has-text("Weiter")').first
                         if await weiter_btn.is_visible(timeout=3000):
                             await weiter_btn.click()
                             logger.info("Clicked Weiter")
-                            await asyncio.sleep(1)
-                        
-                        # If prompt=none, replace with prompt=login via JS
-                        if "prompt=none" in page.url:
-                            logger.info("prompt=none detected — replacing with prompt=login")
-                            await page.evaluate("""
-                                const u = new URL(window.location.href);
-                                u.searchParams.set('prompt', 'login');
-                                window.history.replaceState({}, '', u.toString());
-                            """)
                             await asyncio.sleep(1)
                         
                         # Step 2: password
@@ -909,6 +910,9 @@ class GmxService:
         except Exception:
             own_email = ''
 
+        # Also exclude known main GMX accounts that should NEVER be deleted
+        MAIN_EMAILS = {own_email, 'mara.miro@gmx.de', 'jerosin@gmx.net', 'opensin@gmx.de', 'nemotronv3@gmx.de'}
+
         logger.info("[_find_alias_row] Searching for alias")
         try:
             frame = await self._get_all_email_frame(page)
@@ -921,13 +925,9 @@ class GmxService:
                 line = line.strip()
                 if '@gmx.' not in line:
                     continue
-                if own_email and own_email in line:
-                    continue
-                if 'jerosin@gmx.net' in line or 'opensin@gmx.de' in line:
-                    continue
                 parts = line.split()
                 for part in parts:
-                    if '@gmx.' in part and part != own_email and part != 'jerosin@gmx.net' and part != 'opensin@gmx.de':
+                    if '@gmx.' in part and part not in MAIN_EMAILS:
                         logger.info(f"Found alias: {part}")
                         return part
         except Exception as e:
