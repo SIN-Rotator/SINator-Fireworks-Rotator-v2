@@ -897,17 +897,90 @@ async def _playwright_onboarding() -> None:
     except Exception:
         pass
 
+    # ── Step 4.5: NUKE cookie banner BEFORE checkboxes ──────────────────────
+    # The CookieYes banner overlays the use-case checkboxes on Page 2.
+    # If we click checkboxes while the banner is up, React doesn't register
+    # the clicks → POST /onboarding sends body={} → server ignores it.
+    try:
+        cky_count = await browser_console("""(() => {
+            var removed = 0;
+            var all = document.querySelectorAll('[class*="cky"], [id*="cky"], [class*="cookieyes"], [id*="cookieyes"]');
+            removed = all.length;
+            all.forEach(function(el) { el.remove(); });
+            var overlays = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
+            overlays.forEach(function(el) {
+                if (el.style.zIndex > 9998) { el.remove(); removed++; }
+            });
+            document.body.classList.remove('cky-modal-open', 'modal-open');
+            document.body.style.overflow = '';
+            return removed;
+        })()""")
+        logger.info(f"Cookie banner nuked BEFORE checkboxes: {cky_count} elements removed")
+    except Exception as e:
+        logger.warning(f"Cookie banner nuke (pre-checkbox) failed: {e}")
+    await asyncio.sleep(0.5)
+
     # ── Step 5: Use-case checkboxes (Page 2) ─────────────────────────────────
-    for uc in [
+    # Use Playwright locator API for proper React synthetic event dispatch.
+    # JS input.click() alone doesn't trigger React onChange for custom checkboxes.
+    use_cases = [
         "Prototype with open models",
         "Flexible capacity for experimentation",
         "Conversational AI",
         "Search",
         "Agentic AI",
-    ]:
-        if not await _click_checkbox_any_strategy(uc):
-            logger.warning(f"Use-case '{uc}' not found")
-        await asyncio.sleep(0.2)
+    ]
+    for uc in use_cases:
+        clicked = False
+        # Strategy 1: Playwright locator (best for React synthetic events)
+        try:
+            from sin_browser_tools.core import manager
+            page = manager.page
+            # Try multiple selector strategies
+            loc = page.locator(f'label:has-text("{uc}")').first
+            if await loc.count() > 0:
+                await loc.click(force=True, timeout=3000)
+                logger.info(f"Use-case '{uc}' clicked via Playwright label locator")
+                clicked = True
+        except Exception as e:
+            logger.info(f"Playwright label click for '{uc}': {e}")
+        # Strategy 2: JS click as fallback
+        if not clicked:
+            if not await _click_checkbox_any_strategy(uc):
+                logger.warning(f"Use-case '{uc}' not found via any strategy")
+            else:
+                clicked = True
+        await asyncio.sleep(0.3)
+
+    # Verify checkbox states — log which are actually checked
+    try:
+        cb_states = await browser_console("""(() => {
+            var results = [];
+            // Check input[type=checkbox]
+            var inputs = document.querySelectorAll('input[type="checkbox"]');
+            for (var i=0; i<inputs.length; i++) {
+                results.push({
+                    type: 'input',
+                    aria: inputs[i].getAttribute('aria-label') || '',
+                    checked: inputs[i].checked,
+                    name: inputs[i].name || ''
+                });
+            }
+            // Check [role=checkbox]
+            var roles = document.querySelectorAll('[role="checkbox"]');
+            for (var j=0; j<roles.length; j++) {
+                results.push({
+                    type: 'role',
+                    aria: roles[j].getAttribute('aria-label') || '',
+                    checked: roles[j].getAttribute('aria-checked') === 'true',
+                    text: (roles[j].textContent || '').trim().substring(0, 40)
+                });
+            }
+            return results;
+        })()""")
+        logger.info(f"Checkbox states after clicking: {cb_states}")
+    except Exception as e:
+        logger.warning(f"Checkbox state verification failed: {e}")
 
     # ── Step 6: Submit (Page 2 → home/settings) ─────────────────────────────
     # DIAG: log all buttons on Page 2
@@ -1057,7 +1130,34 @@ async def _playwright_onboarding() -> None:
     escaped_onboarding = False
     for click_round in range(3):
         if click_round > 0:
-            logger.info(f"=== Submit re-click round {click_round+1}/3 — nuking cookies + clicking Submit ===")
+            logger.info(f"=== Submit re-click round {click_round+1}/3 — nuking cookies + re-checking checkboxes + clicking Submit ===")
+            # Re-check any unchecked use-case checkboxes (React may have reset them)
+            try:
+                unchecked = await browser_console("""(() => {
+                    var rechecked = 0;
+                    var inputs = document.querySelectorAll('input[type="checkbox"]');
+                    for (var i=0; i<inputs.length; i++) {
+                        var aria = (inputs[i].getAttribute('aria-label') || '').toLowerCase();
+                        if (!inputs[i].checked && (aria.indexOf('prototype') !== -1 || aria.indexOf('flexible') !== -1 || aria.indexOf('conversational') !== -1 || aria.indexOf('search') !== -1 || aria.indexOf('agentic') !== -1)) {
+                            inputs[i].click();
+                            rechecked++;
+                        }
+                    }
+                    var roles = document.querySelectorAll('[role="checkbox"]');
+                    for (var j=0; j<roles.length; j++) {
+                        var aria2 = (roles[j].getAttribute('aria-label') || '').toLowerCase();
+                        if (roles[j].getAttribute('aria-checked') !== 'true' && (aria2.indexOf('prototype') !== -1 || aria2.indexOf('flexible') !== -1 || aria2.indexOf('conversational') !== -1 || aria2.indexOf('search') !== -1 || aria2.indexOf('agentic') !== -1)) {
+                            roles[j].click();
+                            rechecked++;
+                        }
+                    }
+                    return rechecked;
+                })()""")
+                if unchecked and unchecked.get("result", 0) > 0:
+                    logger.info(f"Re-checked {unchecked.get('result')} unchecked use-case checkboxes")
+                    await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.warning(f"Re-check checkboxes failed: {e}")
             await _kill_cookie_banner_and_click_submit()
         else:
             logger.info("=== Submit click round 1/3 ===")
@@ -1400,14 +1500,25 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
             await browser_click_by_text("Create API Key", role="button")
             # No fixed sleep — poll for dialog input below
         except Exception:
-            if attempt_try < 2:
-                logger.warning("Create API Key button not found — retry")
-                try:
-                    await browser_navigate(API_KEYS_URL)
-                    await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
-                except Exception:
-                    pass
-                continue
+            # Fallback: Playwright locator for React buttons
+            try:
+                from sin_browser_tools.core import manager
+                page = manager.page
+                btn = page.locator('button:has-text("Create API Key")').first
+                if await btn.count() > 0:
+                    await btn.click(force=True, timeout=5000)
+                    logger.info("Create API Key clicked via Playwright locator")
+                else:
+                    raise Exception("Playwright locator found 0 buttons")
+            except Exception as pw_err:
+                if attempt_try < 2:
+                    logger.warning(f"Create API Key button not found (browser_click: fail, Playwright: {pw_err}) — retry")
+                    try:
+                        await browser_navigate(API_KEYS_URL)
+                        await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
+                    except Exception:
+                        pass
+                    continue
 
         try:
             await browser_click_by_text("API Key", role="menuitem")
