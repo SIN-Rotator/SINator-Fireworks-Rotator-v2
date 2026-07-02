@@ -1050,32 +1050,47 @@ async def _playwright_onboarding() -> None:
     await _kill_cookie_banner_and_click_submit()
     submit_clicked = True  # Assume clicked — we used 3 strategies
 
-    # ── Multi-click Submit with long polling (up to 5 min per attempt) ──────
-    # The Fireworks onboarding Submit button can take up to 5 minutes to
-    # process. If the first click doesn't redirect, click AGAIN after the
-    # poll window expires. Up to 3 click attempts, 300s each.
+    # ── Submit click: 3 rounds, 30s poll each, then 300s final wait ─────────
+    # Fireworks onboarding Submit fails silently sometimes — the click goes
+    # through but server-side processing fails. We detect this quickly (30s)
+    # and re-click. Only after 3 quick attempts do we do a long final poll.
     escaped_onboarding = False
     for click_round in range(3):
         if click_round > 0:
-            logger.info(f"=== Submit click round {click_round+1} — nuking cookies + re-clicking Submit ===")
+            logger.info(f"=== Submit re-click round {click_round+1}/3 — nuking cookies + clicking Submit ===")
             await _kill_cookie_banner_and_click_submit()
-            await asyncio.sleep(2)
+        else:
+            logger.info("=== Submit click round 1/3 ===")
 
-        # Poll every 2s for onboarding redirect (max 300s = 5 min per round)
+        # Quick poll: 30s (15 × 2s) — enough time for Fireworks to redirect
+        for attempt in range(15):
+            await asyncio.sleep(2)
+            url = (await browser_get_url())["url"]
+            if 'onboarding' not in url:
+                logger.info(f"Redirect after Submit (round {click_round+1}, { (attempt+1)*2}s): {url[:60]}")
+                logger.info("Waiting 8s for page to fully load...")
+                await asyncio.sleep(8)
+                escaped_onboarding = True
+                break
+            logger.info(f"Round {click_round+1}/3 poll {attempt+1}/15 — still on /onboarding ({(attempt+1)*2}s)")
+
+        if escaped_onboarding:
+            break
+
+    # If still on /onboarding after 3 quick click rounds, do ONE long poll (300s)
+    # — maybe the 3rd click triggered a slow server-side process
+    if not escaped_onboarding:
+        logger.info("3 quick clicks failed — doing final long poll (300s) for slow server response")
         for attempt in range(150):
             await asyncio.sleep(2)
             url = (await browser_get_url())["url"]
             if 'onboarding' not in url:
-                logger.info(f"Redirect after Submit (round {click_round+1}, poll {attempt+1}/150, {(attempt+1)*2}s): {url[:60]}")
-                logger.info("Waiting 8s for page to fully load after onboarding redirect...")
+                logger.info(f"Late redirect after long poll ({(attempt+1)*2}s): {url[:60]}")
                 await asyncio.sleep(8)
                 escaped_onboarding = True
                 break
             if attempt % 15 == 0:
-                logger.info(f"Onboarding poll round {click_round+1} {attempt+1}/150 — still on /onboarding ({(attempt+1)*2}s)")
-
-        if escaped_onboarding:
-            break
+                logger.info(f"Final long poll {attempt+1}/150 — still on /onboarding ({(attempt+1)*2}s)")
 
     # If still on /onboarding after 3 click rounds, try direct API call
     url = (await browser_get_url())["url"]
