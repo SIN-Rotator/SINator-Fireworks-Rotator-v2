@@ -263,36 +263,50 @@ async def cleanup_bot(browser_manager=None) -> None:
 
 async def _dismiss_cookie_consent() -> None:
     """Central cookie consent banner dismissal — call after EVERY Fireworks navigation.
-    
-    The init_script in launch() sets localStorage consent + CSS hiding + MutationObserver
-    to PREVENT the banner. This function is the reactive fallback that removes any
-    banner that slipped through (e.g. if CookieYes ignores localStorage).
-    
-    A 3-second polling loop catches late-appearing banners (setTimeout-based injection).
+
+    The init_script in launch() sets localStorage consent + CSS hiding to PREVENT
+    the banner. This function is the reactive fallback that removes any banner that
+    slipped through (e.g. if CookieYes ignores localStorage).
+
+    CookieYes injects its banner via setTimeout, which can fire 1-3 seconds after
+    page load. We poll for 2s (5 × 400ms) to catch late banners, breaking early
+    when "Reject All" is successfully clicked.
     """
     from sin_browser_tools.tools.interaction import browser_click_by_text
     from sin_browser_tools.tools.extraction import browser_console
 
-    # 1. Nuke all consent DOM elements immediately (no waiting)
-    await browser_console("""(() => {
+    NUKE_JS = """(() => {
         document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
         document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
         document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
         document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
         document.body.style.overflow = 'visible';
         document.documentElement.style.overflow = 'visible';
-    })()""")
-    # 2. Try clicking "Reject All" if banner survived nuke
-    try:
-        await browser_click_by_text("Reject All", role="button")
-        logger.info("Cookie banner: 'Reject All' clicked")
-    except Exception:
-        pass
-    # 3. One quick re-nuke after 0.3s for late-injected banners
-    await asyncio.sleep(0.3)
-    await browser_console("""(() => {
-        document.querySelectorAll('[class*="cky-"],[class*="consent"],[class*="cookie-banner"]').forEach(e => e.remove());
-    })()""")
+    })()"""
+
+    # 1. Immediate nuke (catches pre-rendered banners)
+    await browser_console(NUKE_JS)
+
+    # 2. Try clicking "Reject All" / "Decline" if banner survived nuke
+    for label in ("Reject All", "Decline", "Reject"):
+        try:
+            await browser_click_by_text(label, role="button")
+            logger.info(f"Cookie banner: '{label}' clicked")
+            return
+        except Exception:
+            pass
+
+    # 3. Poll for late-injected banners (CookieYes uses setTimeout, can appear 1-3s after load)
+    for i in range(5):
+        await asyncio.sleep(0.4)
+        await browser_console(NUKE_JS)
+        for label in ("Reject All", "Decline", "Reject"):
+            try:
+                await browser_click_by_text(label, role="button")
+                logger.info(f"Cookie banner: '{label}' clicked (poll #{i+1})")
+                return
+            except Exception:
+                pass
 
 
 async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]:
