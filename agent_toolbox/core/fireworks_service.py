@@ -537,24 +537,29 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
 
-    for _ in range(10):
+    # After onboarding: wait up to 30s for redirect (was 10s — too short,
+    # caused force-navigate to api-keys which interrupted onboarding processing)
+    for _ in range(30):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
-        if 'login' not in url.lower():
+        if 'login' not in url.lower() and 'onboarding' not in url.lower():
             if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
                 logger.info(f"Final redirect: {url[:60]}")
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
 
+    # Only force-navigate as LAST resort — and go to home first, not api-keys.
+    # Going directly to api-keys before onboarding is fully processed can
+    # cause "Dialog not found" because the account isn't ready yet.
     for u in [
-        "https://app.fireworks.ai/settings/users/api-keys",
         "https://app.fireworks.ai/",
+        "https://app.fireworks.ai/settings/users/api-keys",
     ]:
         try:
             await browser_navigate(u)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             url = (await browser_get_url())["url"]
-            if 'login' not in url.lower():
+            if 'login' not in url.lower() and 'onboarding' not in url.lower():
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
         except Exception:
