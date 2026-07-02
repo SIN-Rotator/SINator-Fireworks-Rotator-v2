@@ -897,283 +897,52 @@ async def _playwright_onboarding() -> None:
     except Exception:
         pass
 
-    # ── Step 4.5: NUKE cookie banner BEFORE checkboxes ──────────────────────
-    # The CookieYes banner overlays the use-case checkboxes on Page 2.
-    # If we click checkboxes while the banner is up, React doesn't register
-    # the clicks → POST /onboarding sends body={} → server ignores it.
-    try:
-        cky_count = await browser_console("""(() => {
-            var removed = 0;
-            var all = document.querySelectorAll('[class*="cky"], [id*="cky"], [class*="cookieyes"], [id*="cookieyes"]');
-            removed = all.length;
-            all.forEach(function(el) { el.remove(); });
-            var overlays = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
-            overlays.forEach(function(el) {
-                if (el.style.zIndex > 9998) { el.remove(); removed++; }
-            });
-            document.body.classList.remove('cky-modal-open', 'modal-open');
-            document.body.style.overflow = '';
-            return removed;
-        })()""")
-        logger.info(f"Cookie banner nuked BEFORE checkboxes: {cky_count} elements removed")
-    except Exception as e:
-        logger.warning(f"Cookie banner nuke (pre-checkbox) failed: {e}")
-    await asyncio.sleep(0.5)
-
     # ── Step 5: Use-case checkboxes (Page 2) ─────────────────────────────────
-    # ROOT CAUSE: Fireworks uses custom React checkboxes. Standard approaches
-    # (DOM click, Playwright label click, native value setter) all fail to update
-    # React's useState. The form submission reads from React's state, so
-    # POST /onboarding always sends body={}.
-    #
-    # NEW FIX: Find the Submit button's React fiber, walk up to the form
-    # component, find its useState hooks, and call the state setters directly
-    # to set the form state. This is how React DevTools and browser extensions
-    # manipulate React state programmatically.
-    use_cases = [
+    for uc in [
         "Prototype with open models",
         "Flexible capacity for experimentation",
         "Conversational AI",
         "Search",
         "Agentic AI",
-    ]
+    ]:
+        if not await _click_checkbox_any_strategy(uc):
+            logger.warning(f"Use-case '{uc}' not found")
+        await asyncio.sleep(0.2)
 
-    # APPROACH: Walk React fiber from Submit button upward, find useState hooks,
-    # set the form state directly.
+    # NUCLEAR FIX: React controlled checkbox hack
+    # Standard DOM click() doesn't update React's useState for controlled inputs.
+    # Fix: For EACH unchecked <input type="checkbox">, use the native value setter
+    # to set checked=true, then dispatch a bubbling 'change' event. This is the
+    # same technique React Testing Library uses internally.
     try:
-        state_result = await browser_console("""(() => {
-            // Find Submit button
-            var btns = document.querySelectorAll('button');
-            var submitBtn = null;
-            for (var i=0; i<btns.length; i++) {
-                var t = (btns[i].textContent || '').trim();
-                if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
-                    submitBtn = btns[i];
-                    break;
-                }
-            }
-            if (!submitBtn) return 'no_submit_button';
-
-            // Get React fiber from Submit button
-            var fiberKey = Object.keys(submitBtn).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-            if (!fiberKey) return 'no_fiber_on_submit';
-            var fiber = submitBtn[fiberKey];
-
-            // Walk up the fiber tree, collect all useState dispatch functions
-            var dispatchers = [];
-            var curr = fiber;
-            var visited = new Set();
-            for (var hop=0; hop<30 && curr; hop++) {
-                if (visited.has(curr)) break;
-                visited.add(curr);
-                // Check memoizedState (linked list of hooks)
-                if (curr.memoizedState) {
-                    var hook = curr.memoizedState;
-                    while (hook) {
-                        if (hook.queue && typeof hook.queue.dispatch === 'function') {
-                            // Try to read current state value
-                            var val = hook.memoizedState;
-                            var typeOfVal = typeof val;
-                            dispatchers.push({
-                                hop: hop,
-                                val: typeOfVal === 'object' ? JSON.stringify(val).substring(0, 200) : String(val).substring(0, 200),
-                                type: typeOfVal
-                            });
-                        }
-                        hook = hook.next;
-                    }
-                }
-                curr = curr.return;
-            }
-            return JSON.stringify({dispCount: dispatchers.length, dispatchers: dispatchers.slice(0, 10)});
-        })()""")
-        r = state_result.get("result", "") if isinstance(state_result, dict) else str(state_result)
-        import json as _json
-        try:
-            parsed = _json.loads(r)
-            logger.info(f"React state discovery: {parsed.get('dispCount', 0)} dispatchers found, values: {parsed.get('dispatchers', [])[:5]}")
-        except Exception:
-            logger.info(f"React state discovery raw: {r[:300]}")
-    except Exception as e:
-        logger.warning(f"React state discovery failed: {e}")
-
-    # AGGRESSIVE APPROACH: Find ALL unchecked checkboxes on the page that look
-    # like use-case checkboxes (not the Terms checkbox), and update their
-    # React state using the native input value setter hack.
-    try:
-        bulk_result = await browser_console("""(() => {
-            var updated = 0;
-            // 1. For native <input type="checkbox"> elements: use React's internal setter
+        fix_result = await browser_console("""(() => {
+            var set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked').set;
             var inputs = document.querySelectorAll('input[type="checkbox"]');
+            var fixed = 0;
             for (var i=0; i<inputs.length; i++) {
-                if (inputs[i].checked) continue;  // skip already-checked
-                // Find React fiber
-                var fiberKey = Object.keys(inputs[i]).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-                if (!fiberKey) continue;
-                var fiber = inputs[i][fiberKey];
-                // Walk up to find props with onChange
-                var curr = fiber;
-                var foundOnChange = null;
-                for (var hop=0; hop<15 && curr; hop++) {
-                    if (curr.memoizedProps && typeof curr.memoizedProps.onChange === 'function') {
-                        foundOnChange = curr.memoizedProps.onChange;
-                        break;
-                    }
-                    curr = curr.return;
-                }
-                if (foundOnChange) {
-                    // Use the native input value setter hack
-                    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
-                    nativeInputValueSetter.call(inputs[i], true);
-                    inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
-                    updated++;
-                }
+                if (inputs[i].checked) continue;
+                set.call(inputs[i], true);
+                inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
+                fixed++;
             }
-            // 2. For [role="checkbox"] elements: find fiber and call onClick/onChange
+            // Also fix [role="checkbox"] elements: set aria-checked + dispatch click
             var roles = document.querySelectorAll('[role="checkbox"]');
             for (var j=0; j<roles.length; j++) {
                 if (roles[j].getAttribute('aria-checked') === 'true') continue;
-                var rFiberKey = Object.keys(roles[j]).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-                if (!rFiberKey) continue;
-                var rFiber = roles[j][rFiberKey];
-                var rcurr = rFiber;
-                for (var rhop=0; rhop<15 && rcurr; rhop++) {
-                    if (rcurr.memoizedProps) {
-                        if (typeof rcurr.memoizedProps.onClick === 'function') {
-                            rcurr.memoizedProps.onClick({preventDefault:function(){},stopPropagation:function(){},target:roles[j]});
-                            updated++;
-                            break;
-                        }
-                        if (typeof rcurr.memoizedProps.onChange === 'function') {
-                            rcurr.memoizedProps.onChange({preventDefault:function(){},stopPropagation:function(){},target:roles[j]});
-                            updated++;
-                            break;
-                        }
-                    }
-                    rcurr = rcurr.return;
-                }
+                roles[j].setAttribute('aria-checked', 'true');
+                // Dispatch both click and change events
+                roles[j].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                roles[j].dispatchEvent(new Event('change', { bubbles: true }));
+                fixed++;
             }
-            return updated;
+            return fixed;
         })()""")
-        r = bulk_result.get("result", 0) if isinstance(bulk_result, dict) else 0
-        updated_count = int(r) if str(r).isdigit() else 0
-        logger.info(f"Bulk React-state update: {updated_count} checkboxes updated")
-        if updated_count == 0:
-            # Fallback: use the text-matching approach
-            for uc in use_cases:
-                clicked = False
-                try:
-                    from sin_browser_tools.core import manager
-                    page = manager.page
-                    loc = page.locator(f'label:has-text("{uc}")').first
-                    if await loc.count() > 0:
-                        await loc.click(force=True, timeout=3000)
-                        logger.info(f"Use-case '{uc}' clicked via Playwright label locator (fallback)")
-                        clicked = True
-                except Exception as e:
-                    logger.info(f"Playwright fallback for '{uc}': {e}")
-                if not clicked:
-                    if not await _click_checkbox_any_strategy(uc):
-                        logger.warning(f"Use-case '{uc}' not found via any strategy")
-                await asyncio.sleep(0.3)
-
-    # STEP 5.5: SET REACT FORM STATE DIRECTLY
-    # Walk React fiber from Submit button, find useState dispatchers,
-    # call them with the form data to populate the form state.
-    # This is the nuclear option — bypasses checkbox clicks entirely.
-    try:
-        set_state_result = await browser_console("""(() => {
-            var btns = document.querySelectorAll('button');
-            var submitBtn = null;
-            for (var i=0; i<btns.length; i++) {
-                var t = (btns[i].textContent || '').trim();
-                if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
-                    submitBtn = btns[i];
-                    break;
-                }
-            }
-            if (!submitBtn) return 'no_submit_button';
-            var fiberKey = Object.keys(submitBtn).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-            if (!fiberKey) return 'no_fiber';
-            var fiber = submitBtn[fiberKey];
-            var curr = fiber;
-            var visited = new Set();
-            var setResults = [];
-            for (var hop=0; hop<30 && curr; hop++) {
-                if (visited.has(curr)) break;
-                visited.add(curr);
-                if (curr.memoizedState) {
-                    var hook = curr.memoizedState;
-                    var hookIdx = 0;
-                    while (hook) {
-                        if (hook.queue && typeof hook.queue.dispatch === 'function') {
-                            var val = hook.memoizedState;
-                            if (val && typeof val === 'object' && !Array.isArray(val)) {
-                                // This looks like form state — try to set useCases
-                                var keys = Object.keys(val);
-                                if (keys.length > 0) {
-                                    // Build new state with useCases set
-                                    var newVal = Object.assign({}, val);
-                                    if ('useCases' in newVal || 'use_cases' in newVal) {
-                                        newVal.useCases = ['prototype','flexible','conversational','search','agentic'];
-                                        newVal.use_cases = ['prototype','flexible','conversational','search','agentic'];
-                                        newVal.completed = true;
-                                        newVal.step = 2;
-                                        hook.queue.dispatch(newVal);
-                                        setResults.push('set_state hop=' + hop + ' hook=' + hookIdx + ' keys=' + keys.join(','));
-                                    }
-                                }
-                            }
-                        }
-                        hook = hook.next;
-                        hookIdx++;
-                    }
-                }
-                curr = curr.return;
-            }
-            return setResults.length > 0 ? setResults.join(';') : 'no_form_state_found';
-        })()""")
-        r = set_state_result.get("result", "") if isinstance(set_state_result, dict) else str(set_state_result)
-        logger.info(f"Direct state set result: {r}")
-        await asyncio.sleep(0.5)
+        r = fix_result.get("result", 0) if isinstance(fix_result, dict) else 0
+        n = int(r) if str(r).isdigit() else 0
+        logger.info(f"React controlled checkbox hack: {n} checkboxes fixed")
+        await asyncio.sleep(0.3)
     except Exception as e:
-        logger.warning(f"Direct state set failed: {e}")
-    except Exception as e:
-        logger.warning(f"Bulk checkbox update failed: {e}")
-        # Fallback to original approach
-        for uc in use_cases:
-            await _click_checkbox_any_strategy(uc)
-            await asyncio.sleep(0.2)
-
-    # Verify checkbox states — log which are actually checked
-    try:
-        cb_states = await browser_console("""(() => {
-            var results = [];
-            // Check input[type=checkbox]
-            var inputs = document.querySelectorAll('input[type="checkbox"]');
-            for (var i=0; i<inputs.length; i++) {
-                results.push({
-                    type: 'input',
-                    aria: inputs[i].getAttribute('aria-label') || '',
-                    checked: inputs[i].checked,
-                    name: inputs[i].name || ''
-                });
-            }
-            // Check [role=checkbox]
-            var roles = document.querySelectorAll('[role="checkbox"]');
-            for (var j=0; j<roles.length; j++) {
-                results.push({
-                    type: 'role',
-                    aria: roles[j].getAttribute('aria-label') || '',
-                    checked: roles[j].getAttribute('aria-checked') === 'true',
-                    text: (roles[j].textContent || '').trim().substring(0, 40)
-                });
-            }
-            return results;
-        })()""")
-        logger.info(f"Checkbox states after clicking: {cb_states}")
-    except Exception as e:
-        logger.warning(f"Checkbox state verification failed: {e}")
+        logger.warning(f"Checkbox hack failed: {e}")
 
     # ── Step 6: Submit (Page 2 → home/settings) ─────────────────────────────
     # DIAG: log all buttons on Page 2
@@ -1316,78 +1085,32 @@ async def _playwright_onboarding() -> None:
     await _kill_cookie_banner_and_click_submit()
     submit_clicked = True  # Assume clicked — we used 3 strategies
 
-    # ── Submit click: 3 rounds, 30s poll each, then 300s final wait ─────────
-    # Fireworks onboarding Submit fails silently sometimes — the click goes
-    # through but server-side processing fails. We detect this quickly (30s)
-    # and re-click. Only after 3 quick attempts do we do a long final poll.
+    # ── Multi-click Submit with long polling (up to 5 min per attempt) ──────
+    # The Fireworks onboarding Submit button can take up to 5 minutes to
+    # process. If the first click doesn't redirect, click AGAIN after the
+    # poll window expires. Up to 3 click attempts, 300s each.
     escaped_onboarding = False
     for click_round in range(3):
         if click_round > 0:
-            logger.info(f"=== Submit re-click round {click_round+1}/3 — nuking cookies + re-checking checkboxes + clicking Submit ===")
-            # Re-check any unchecked use-case checkboxes (React may have reset them)
-            try:
-                unchecked = await browser_console("""(() => {
-                    var rechecked = 0;
-                    var inputs = document.querySelectorAll('input[type="checkbox"]');
-                    for (var i=0; i<inputs.length; i++) {
-                        var aria = (inputs[i].getAttribute('aria-label') || '').toLowerCase();
-                        if (!inputs[i].checked && (aria.indexOf('prototype') !== -1 || aria.indexOf('flexible') !== -1 || aria.indexOf('conversational') !== -1 || aria.indexOf('search') !== -1 || aria.indexOf('agentic') !== -1)) {
-                            inputs[i].click();
-                            rechecked++;
-                        }
-                    }
-                    var roles = document.querySelectorAll('[role="checkbox"]');
-                    for (var j=0; j<roles.length; j++) {
-                        var aria2 = (roles[j].getAttribute('aria-label') || '').toLowerCase();
-                        if (roles[j].getAttribute('aria-checked') !== 'true' && (aria2.indexOf('prototype') !== -1 || aria2.indexOf('flexible') !== -1 || aria2.indexOf('conversational') !== -1 || aria2.indexOf('search') !== -1 || aria2.indexOf('agentic') !== -1)) {
-                            roles[j].click();
-                            rechecked++;
-                        }
-                    }
-                    return rechecked;
-                })()""")
-                rechecked_count = 0
-                if isinstance(unchecked, dict):
-                    r = unchecked.get("result", 0)
-                    rechecked_count = int(r) if isinstance(r, (int, str)) and str(r).isdigit() else 0
-                if rechecked_count > 0:
-                    logger.info(f"Re-checked {rechecked_count} unchecked use-case checkboxes")
-                    await asyncio.sleep(0.3)
-            except Exception as e:
-                logger.warning(f"Re-check checkboxes failed: {e}")
+            logger.info(f"=== Submit click round {click_round+1} — nuking cookies + re-clicking Submit ===")
             await _kill_cookie_banner_and_click_submit()
-        else:
-            logger.info("=== Submit click round 1/3 ===")
-
-        # Quick poll: 30s (15 × 2s) — enough time for Fireworks to redirect
-        for attempt in range(15):
             await asyncio.sleep(2)
-            url = (await browser_get_url())["url"]
-            if 'onboarding' not in url:
-                logger.info(f"Redirect after Submit (round {click_round+1}, { (attempt+1)*2}s): {url[:60]}")
-                logger.info("Waiting 8s for page to fully load...")
-                await asyncio.sleep(8)
-                escaped_onboarding = True
-                break
-            logger.info(f"Round {click_round+1}/3 poll {attempt+1}/15 — still on /onboarding ({(attempt+1)*2}s)")
 
-        if escaped_onboarding:
-            break
-
-    # If still on /onboarding after 3 quick click rounds, do ONE long poll (300s)
-    # — maybe the 3rd click triggered a slow server-side process
-    if not escaped_onboarding:
-        logger.info("3 quick clicks failed — doing final long poll (300s) for slow server response")
+        # Poll every 2s for onboarding redirect (max 300s = 5 min per round)
         for attempt in range(150):
             await asyncio.sleep(2)
             url = (await browser_get_url())["url"]
             if 'onboarding' not in url:
-                logger.info(f"Late redirect after long poll ({(attempt+1)*2}s): {url[:60]}")
+                logger.info(f"Redirect after Submit (round {click_round+1}, poll {attempt+1}/150, {(attempt+1)*2}s): {url[:60]}")
+                logger.info("Waiting 8s for page to fully load after onboarding redirect...")
                 await asyncio.sleep(8)
                 escaped_onboarding = True
                 break
             if attempt % 15 == 0:
-                logger.info(f"Final long poll {attempt+1}/150 — still on /onboarding ({(attempt+1)*2}s)")
+                logger.info(f"Onboarding poll round {click_round+1} {attempt+1}/150 — still on /onboarding ({(attempt+1)*2}s)")
+
+        if escaped_onboarding:
+            break
 
     # If still on /onboarding after 3 click rounds, try direct API call
     url = (await browser_get_url())["url"]
@@ -1697,25 +1420,14 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
             await browser_click_by_text("Create API Key", role="button")
             # No fixed sleep — poll for dialog input below
         except Exception:
-            # Fallback: Playwright locator for React buttons
-            try:
-                from sin_browser_tools.core import manager
-                page = manager.page
-                btn = page.locator('button:has-text("Create API Key")').first
-                if await btn.count() > 0:
-                    await btn.click(force=True, timeout=5000)
-                    logger.info("Create API Key clicked via Playwright locator")
-                else:
-                    raise Exception("Playwright locator found 0 buttons")
-            except Exception as pw_err:
-                if attempt_try < 2:
-                    logger.warning(f"Create API Key button not found (browser_click: fail, Playwright: {pw_err}) — retry")
-                    try:
-                        await browser_navigate(API_KEYS_URL)
-                        await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
-                    except Exception:
-                        pass
-                    continue
+            if attempt_try < 2:
+                logger.warning("Create API Key button not found — retry")
+                try:
+                    await browser_navigate(API_KEYS_URL)
+                    await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
+                except Exception:
+                    pass
+                continue
 
         try:
             await browser_click_by_text("API Key", role="menuitem")
