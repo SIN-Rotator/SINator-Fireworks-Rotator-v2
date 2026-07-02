@@ -232,6 +232,18 @@ async def main():
                 pool = PoolManager()
                 pool.add_key(api_key=api_key, alias_email=alias, key_name=key_name)
                 logger.info(f"Saved to pool ({pool.get_stats()['total']} keys total)")
+
+                # Step 7: Notify SINator backend to reload pool
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(
+                        "http://localhost:8000/api/v1/pool/reload",
+                        method="POST",
+                    )
+                    resp = urllib.request.urlopen(req, timeout=5)
+                    logger.info(f"Backend pool reloaded: {resp.status}")
+                except Exception as reload_err:
+                    logger.warning(f"Backend pool reload failed (non-critical): {reload_err}")
             except Exception as e:
                 logger.warning(f"Pool save skipped: {e}")
 
