@@ -263,50 +263,37 @@ async def cleanup_bot(browser_manager=None) -> None:
 
 async def _dismiss_cookie_consent() -> None:
     """Central cookie consent banner dismissal — call after EVERY Fireworks navigation.
-
-    The init_script in launch() sets localStorage consent + CSS hiding to PREVENT
-    the banner. This function is the reactive fallback that removes any banner that
-    slipped through (e.g. if CookieYes ignores localStorage).
-
-    CookieYes injects its banner via setTimeout, which can fire 1-3 seconds after
-    page load. We poll for 2s (5 × 400ms) to catch late banners, breaking early
-    when "Reject All" is successfully clicked.
+    
+    The init_script in launch() sets localStorage consent + CSS hiding + MutationObserver
+    to PREVENT the banner. This function is the reactive fallback that removes any
+    banner that slipped through (e.g. if CookieYes ignores localStorage).
     """
     from sin_browser_tools.tools.interaction import browser_click_by_text
     from sin_browser_tools.tools.extraction import browser_console
 
-    NUKE_JS = """(() => {
+    # 1. Try clicking "Reject All" (cleanest — sets CookieYes consent properly)
+    try:
+        await browser_click_by_text("Reject All", role="button")
+        await asyncio.sleep(0.5)
+        logger.info("Cookie banner: 'Reject All' clicked")
+    except Exception:
+        pass
+
+    # 2. Nuke all known consent DOM elements via JS
+    await browser_console("""(() => {
+        // CookieYes (cky-*)
         document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
+        // OneTrust
         document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
+        // Generic consent containers
         document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
+        // Iframe-based banners
         document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
+        // Restore scroll
         document.body.style.overflow = 'visible';
         document.documentElement.style.overflow = 'visible';
-    })()"""
-
-    # 1. Immediate nuke (catches pre-rendered banners)
-    await browser_console(NUKE_JS)
-
-    # 2. Try clicking "Reject All" / "Decline" if banner survived nuke
-    for label in ("Reject All", "Decline", "Reject"):
-        try:
-            await browser_click_by_text(label, role="button")
-            logger.info(f"Cookie banner: '{label}' clicked")
-            return
-        except Exception:
-            pass
-
-    # 3. Poll for late-injected banners (CookieYes uses setTimeout, can appear 1-3s after load)
-    for i in range(5):
-        await asyncio.sleep(0.4)
-        await browser_console(NUKE_JS)
-        for label in ("Reject All", "Decline", "Reject"):
-            try:
-                await browser_click_by_text(label, role="button")
-                logger.info(f"Cookie banner: '{label}' clicked (poll #{i+1})")
-                return
-            except Exception:
-                pass
+    })()""")
+    await asyncio.sleep(0.3)
 
 
 async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]:
@@ -537,29 +524,24 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
 
-    # After onboarding: wait up to 30s for redirect (was 10s — too short,
-    # caused force-navigate to api-keys which interrupted onboarding processing)
-    for _ in range(30):
+    for _ in range(10):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
-        if 'login' not in url.lower() and 'onboarding' not in url.lower():
+        if 'login' not in url.lower():
             if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
                 logger.info(f"Final redirect: {url[:60]}")
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
 
-    # Only force-navigate as LAST resort — and go to home first, not api-keys.
-    # Going directly to api-keys before onboarding is fully processed can
-    # cause "Dialog not found" because the account isn't ready yet.
     for u in [
-        "https://app.fireworks.ai/",
         "https://app.fireworks.ai/settings/users/api-keys",
+        "https://app.fireworks.ai/",
     ]:
         try:
             await browser_navigate(u)
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             url = (await browser_get_url())["url"]
-            if 'login' not in url.lower() and 'onboarding' not in url.lower():
+            if 'login' not in url.lower():
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
         except Exception:
@@ -1345,39 +1327,29 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     await _dismiss_cookie_consent()
 
     for attempt_try in range(3):
-        await _dismiss_cookie_consent()
         try:
             await browser_click_by_text("Create API Key", role="button")
+            # No fixed sleep — poll for dialog input below
         except Exception:
             if attempt_try < 2:
-                logger.warning(f"Create API Key button not found — retry {attempt_try+1}/3")
+                logger.warning("Create API Key button not found — retry")
                 try:
                     await browser_navigate(API_KEYS_URL)
                     await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
-                    await _dismiss_cookie_consent()
                 except Exception:
                     pass
                 continue
 
-        # Click "API Key" menu item if dropdown appeared
-        await asyncio.sleep(1)
         try:
             await browser_click_by_text("API Key", role="menuitem")
         except Exception:
             pass
 
-        # Poll for dialog input — 10s timeout (was 5s, too short for React)
-        if await _poll_for_element('input[name="name"]', timeout=10, interval=0.3):
+        # Poll for dialog input to appear (replaces fixed sleep)
+        if await _poll_for_element('input[name="name"]', timeout=5, interval=0.2):
             break
-        logger.warning(f"Dialog not appearing — retry {attempt_try+1}/3")
-        if attempt_try < 2:
-            try:
-                await browser_navigate(API_KEYS_URL)
-                await _poll_for_url_contains("api-keys", timeout=5, interval=0.3)
-            except Exception:
-                pass
     else:
-        logger.error("API Key dialog never appeared after 3 attempts")
+        logger.error("API Key dialog never appeared")
         return {"status": "error", "error": "Dialog not found"}
 
     for retry in range(3):
