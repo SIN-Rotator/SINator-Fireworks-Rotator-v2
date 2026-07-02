@@ -922,17 +922,14 @@ async def _playwright_onboarding() -> None:
 
     # ── Step 5: Use-case checkboxes (Page 2) ─────────────────────────────────
     # ROOT CAUSE: Fireworks uses custom React checkboxes. Standard approaches
-    # (DOM click, Playwright label click) set checked=True on the DOM but
-    # don't update React's useState. The form submission reads from React's
-    # state, so POST /onboarding always sends body={}.
+    # (DOM click, Playwright label click, native value setter) all fail to update
+    # React's useState. The form submission reads from React's state, so
+    # POST /onboarding always sends body={}.
     #
-    # FIX: For native <input type="checkbox"> elements, we need to:
-    # 1. Set the `checked` property via the React-internal value setter
-    # 2. Dispatch a native 'change' event (not 'click')
-    # This is the standard React hack to programmatically update controlled inputs.
-    #
-    # For custom [role="checkbox"] elements, we walk the React fiber tree to
-    # find the onClick prop and call it directly.
+    # NEW FIX: Find the Submit button's React fiber, walk up to the form
+    # component, find its useState hooks, and call the state setters directly
+    # to set the form state. This is how React DevTools and browser extensions
+    # manipulate React state programmatically.
     use_cases = [
         "Prototype with open models",
         "Flexible capacity for experimentation",
@@ -940,6 +937,65 @@ async def _playwright_onboarding() -> None:
         "Search",
         "Agentic AI",
     ]
+
+    # APPROACH: Walk React fiber from Submit button upward, find useState hooks,
+    # set the form state directly.
+    try:
+        state_result = await browser_console("""(() => {
+            // Find Submit button
+            var btns = document.querySelectorAll('button');
+            var submitBtn = null;
+            for (var i=0; i<btns.length; i++) {
+                var t = (btns[i].textContent || '').trim();
+                if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
+                    submitBtn = btns[i];
+                    break;
+                }
+            }
+            if (!submitBtn) return 'no_submit_button';
+
+            // Get React fiber from Submit button
+            var fiberKey = Object.keys(submitBtn).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+            if (!fiberKey) return 'no_fiber_on_submit';
+            var fiber = submitBtn[fiberKey];
+
+            // Walk up the fiber tree, collect all useState dispatch functions
+            var dispatchers = [];
+            var curr = fiber;
+            var visited = new Set();
+            for (var hop=0; hop<30 && curr; hop++) {
+                if (visited.has(curr)) break;
+                visited.add(curr);
+                // Check memoizedState (linked list of hooks)
+                if (curr.memoizedState) {
+                    var hook = curr.memoizedState;
+                    while (hook) {
+                        if (hook.queue && typeof hook.queue.dispatch === 'function') {
+                            // Try to read current state value
+                            var val = hook.memoizedState;
+                            var typeOfVal = typeof val;
+                            dispatchers.push({
+                                hop: hop,
+                                val: typeOfVal === 'object' ? JSON.stringify(val).substring(0, 200) : String(val).substring(0, 200),
+                                type: typeOfVal
+                            });
+                        }
+                        hook = hook.next;
+                    }
+                }
+                curr = curr.return;
+            }
+            return JSON.stringify({dispCount: dispatchers.length, dispatchers: dispatchers.slice(0, 10)});
+        })()""")
+        r = state_result.get("result", "") if isinstance(state_result, dict) else str(state_result)
+        import json as _json
+        try:
+            parsed = _json.loads(r)
+            logger.info(f"React state discovery: {parsed.get('dispCount', 0)} dispatchers found, values: {parsed.get('dispatchers', [])[:5]}")
+        except Exception:
+            logger.info(f"React state discovery raw: {r[:300]}")
+    except Exception as e:
+        logger.warning(f"React state discovery failed: {e}")
 
     # AGGRESSIVE APPROACH: Find ALL unchecked checkboxes on the page that look
     # like use-case checkboxes (not the Terms checkbox), and update their
@@ -1020,6 +1076,68 @@ async def _playwright_onboarding() -> None:
                     if not await _click_checkbox_any_strategy(uc):
                         logger.warning(f"Use-case '{uc}' not found via any strategy")
                 await asyncio.sleep(0.3)
+
+    # STEP 5.5: SET REACT FORM STATE DIRECTLY
+    # Walk React fiber from Submit button, find useState dispatchers,
+    # call them with the form data to populate the form state.
+    # This is the nuclear option — bypasses checkbox clicks entirely.
+    try:
+        set_state_result = await browser_console("""(() => {
+            var btns = document.querySelectorAll('button');
+            var submitBtn = null;
+            for (var i=0; i<btns.length; i++) {
+                var t = (btns[i].textContent || '').trim();
+                if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
+                    submitBtn = btns[i];
+                    break;
+                }
+            }
+            if (!submitBtn) return 'no_submit_button';
+            var fiberKey = Object.keys(submitBtn).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+            if (!fiberKey) return 'no_fiber';
+            var fiber = submitBtn[fiberKey];
+            var curr = fiber;
+            var visited = new Set();
+            var setResults = [];
+            for (var hop=0; hop<30 && curr; hop++) {
+                if (visited.has(curr)) break;
+                visited.add(curr);
+                if (curr.memoizedState) {
+                    var hook = curr.memoizedState;
+                    var hookIdx = 0;
+                    while (hook) {
+                        if (hook.queue && typeof hook.queue.dispatch === 'function') {
+                            var val = hook.memoizedState;
+                            if (val && typeof val === 'object' && !Array.isArray(val)) {
+                                // This looks like form state — try to set useCases
+                                var keys = Object.keys(val);
+                                if (keys.length > 0) {
+                                    // Build new state with useCases set
+                                    var newVal = Object.assign({}, val);
+                                    if ('useCases' in newVal || 'use_cases' in newVal) {
+                                        newVal.useCases = ['prototype','flexible','conversational','search','agentic'];
+                                        newVal.use_cases = ['prototype','flexible','conversational','search','agentic'];
+                                        newVal.completed = true;
+                                        newVal.step = 2;
+                                        hook.queue.dispatch(newVal);
+                                        setResults.push('set_state hop=' + hop + ' hook=' + hookIdx + ' keys=' + keys.join(','));
+                                    }
+                                }
+                            }
+                        }
+                        hook = hook.next;
+                        hookIdx++;
+                    }
+                }
+                curr = curr.return;
+            }
+            return setResults.length > 0 ? setResults.join(';') : 'no_form_state_found';
+        })()""")
+        r = set_state_result.get("result", "") if isinstance(set_state_result, dict) else str(set_state_result)
+        logger.info(f"Direct state set result: {r}")
+        await asyncio.sleep(0.5)
+    except Exception as e:
+        logger.warning(f"Direct state set failed: {e}")
     except Exception as e:
         logger.warning(f"Bulk checkbox update failed: {e}")
         # Fallback to original approach
