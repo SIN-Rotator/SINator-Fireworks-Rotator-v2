@@ -681,21 +681,38 @@ class GmxService:
                         if await login_btn.is_visible(timeout=3000):
                             await login_btn.click()
                             logger.info("Clicked Login")
-                            await asyncio.sleep(1)
-                        
-                        url = page.url
-                        logger.info(f"After login: {url[:80]}")
-                        if "navigator.gmx.net/mail?sid=" in url:
-                            return True
-                        if "navigator.gmx.net" in url:
-                            return True
-                        # V20: GMX may redirect to www.gmx.net/ — verify
-                        if "gmx.net" in url and "nologin" not in url:
-                            logger.info("Login may have succeeded — verifying via mail nav")
-                            await page.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
-                            await asyncio.sleep(3)
-                            if "navigator.gmx.net" in page.url and "login" not in page.url.lower():
+                            # CRITICAL: GMX redirect can take 2-5s. Poll for URL change.
+                            old_url = page.url
+                            for _ in range(10):
+                                await asyncio.sleep(1)
+                                url = page.url
+                                if url != old_url:
+                                    break
+                            url = page.url
+                            logger.info(f"After login: {url[:80]}")
+                            if "navigator.gmx.net/mail?sid=" in url:
                                 return True
+                            if "navigator.gmx.net" in url and "login" not in url.lower():
+                                return True
+                            # Still on auth.gmx.net? Wait more and re-check
+                            if "auth.gmx.net" in url:
+                                logger.info("Still on auth.gmx.net — waiting 5s more for redirect...")
+                                for _ in range(5):
+                                    await asyncio.sleep(1)
+                                    url = page.url
+                                    if "navigator.gmx.net" in url:
+                                        logger.info(f"Late redirect: {url[:80]}")
+                                        return True
+                            # V20: GMX may redirect to www.gmx.net/ — verify
+                            if "gmx.net" in url and "nologin" not in url and "auth.gmx.net" not in url:
+                                logger.info("Login may have succeeded — verifying via mail nav")
+                                await page.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
+                                for _ in range(5):
+                                    await asyncio.sleep(1)
+                                    if "navigator.gmx.net" in page.url and "login" not in page.url.lower():
+                                        logger.info(f"Mail nav confirmed: {page.url[:80]}")
+                                        return True
+                                logger.info(f"After mail nav: {page.url[:80]}")
                 else:
                     logger.warning("Login button not found on homepage")
             except Exception as e:
