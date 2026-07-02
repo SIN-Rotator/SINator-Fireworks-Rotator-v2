@@ -209,6 +209,10 @@ async def main():
         else:
             logger.info(f"Login: {login_result.get('status')} - {login_result.get('error', '')}")
 
+        # Wait for account to be fully provisioned after onboarding
+        logger.info("Waiting 5s for account to settle before API key creation...")
+        await asyncio.sleep(5)
+
         # Step 5: API Key
         logger.info("=== API Key ===")
         key_name = alias.split("@")[0].split("-")[0] if alias else "sinator-key"

@@ -524,24 +524,27 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
 
-    for _ in range(10):
+    for _ in range(15):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
-        if 'login' not in url.lower():
+        if 'login' not in url.lower() and 'onboarding' not in url.lower():
             if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
                 logger.info(f"Final redirect: {url[:60]}")
+                # Wait for page to fully load after redirect
+                logger.info("Waiting 5s for page load after redirect...")
+                await asyncio.sleep(5)
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
 
     for u in [
-        "https://app.fireworks.ai/settings/users/api-keys",
         "https://app.fireworks.ai/",
+        "https://app.fireworks.ai/settings/users/api-keys",
     ]:
         try:
             await browser_navigate(u)
-            await asyncio.sleep(1)
+            await asyncio.sleep(3)
             url = (await browser_get_url())["url"]
-            if 'login' not in url.lower():
+            if 'login' not in url.lower() and 'onboarding' not in url.lower():
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
         except Exception:
@@ -1017,14 +1020,18 @@ async def _playwright_onboarding() -> None:
     except Exception as e:
         logger.info(f"Playwright force-click on Submit: {e}")
 
-    # Poll every 1s for onboarding redirect (max 60s) — was 5s, now responsive
+    # Poll every 1s for onboarding redirect (max 60s)
     for attempt in range(60):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if 'onboarding' not in url:
-            logger.info(f"Redirect after Submit (poll {attempt+1}/12, {(attempt+1)*5}s): {url[:60]}")
+            logger.info(f"Redirect after Submit (poll {attempt+1}/60, {attempt+1}s): {url[:60]}")
+            # CRITICAL: URL changed but page may still be loading.
+            # Wait for page to fully render before proceeding.
+            logger.info("Waiting 8s for page to fully load after onboarding redirect...")
+            await asyncio.sleep(8)
             break
-        logger.info(f"Onboarding poll {attempt+1}/12 — still on /onboarding ({(attempt+1)*5}s)")
+        logger.info(f"Onboarding poll {attempt+1}/60 — still on /onboarding ({attempt+1}s)")
 
     # If still on /onboarding, try direct API call to complete onboarding
     url = (await browser_get_url())["url"]
@@ -1207,12 +1214,15 @@ async def _playwright_onboarding() -> None:
             logger.info("Enter key sent as Submit fallback")
             await asyncio.sleep(1)
 
-    # Final long wait: poll every 5s, max 60s
-    for _ in range(12):
+    # Final long wait: poll every 1s, max 30s
+    for _ in range(30):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
         if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
             logger.info(f"Onboarding redirect: {url[:60]}")
+            # Wait for page to fully load
+            logger.info("Waiting 8s for page to fully load...")
+            await asyncio.sleep(8)
             return
     else:
         # Log ALL API responses, console msgs, and JS errors before giving up
@@ -1345,8 +1355,8 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
         except Exception:
             pass
 
-        # Poll for dialog input to appear (replaces fixed sleep)
-        if await _poll_for_element('input[name="name"]', timeout=5, interval=0.2):
+        # Poll for dialog input to appear — 15s timeout (was 5s, too short if page still loading)
+        if await _poll_for_element('input[name="name"]', timeout=15, interval=0.3):
             break
     else:
         logger.error("API Key dialog never appeared")
