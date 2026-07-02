@@ -967,50 +967,65 @@ async def _playwright_onboarding() -> None:
     except Exception:
         pass
 
-    submit_clicked = False
-    for txt in ("Submit to get $6 Credits", "Submit to get $5 Credits", "Submit", "Skip", "Finish setup", "Complete profile", "Get started", "Get $5", "Get $6", "Finish", "Continue", "Complete onboarding"):
+    # ── KILL COOKIE BANNER + CLICK SUBMIT (3 strategies, always all 3) ──────
+    async def _kill_cookie_banner_and_click_submit():
+        """Remove all cky elements from DOM, then click Submit via 3 strategies."""
+        # 1. Nuke all cookie banner elements from DOM
         try:
-            await browser_click_by_text(txt, role="button")
-            logger.info(f"Page 2 submit clicked via '{txt}'")
-            submit_clicked = True
-            break
-        except Exception:
-            continue
-
-    # JS direct click — ONLY if browser_click_by_text didn't work
-    if not submit_clicked:
-        logger.info("Submit not clicked yet — trying JS direct click on Submit button")
-        js_result = await browser_console("""(() => {
-            var b = document.querySelectorAll('button');
-            for (var i=0; i<b.length; i++) {
-                var t = (b[i].textContent || '').trim();
-                // Match "Submit to get $6 Credits" OR "Submit to get $5 Credits" OR exact "Submit"
-                // NEVER match "Skip" — Skip cancels the onboarding!
-                if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
-                    var propKey = Object.keys(b[i]).find(k => k.startsWith('__reactProps'));
-                    if (propKey && b[i][propKey] && b[i][propKey].onClick) {
-                        try {
-                            b[i][propKey].onClick({preventDefault: function(){}, stopPropagation: function(){}});
-                            return 'react_onclick: ' + t;
-                        } catch(e) {
-                            b[i].click();
-                            b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                            return 'fallback_click: ' + t;
+            cky_result = await browser_console("""(() => {
+                var removed = 0;
+                // Remove all elements with cky in class or id
+                var all = document.querySelectorAll('[class*="cky"], [id*="cky"], [class*="cookieyes"], [id*="cookieyes"]');
+                removed = all.length;
+                all.forEach(function(el) { el.remove(); });
+                // Also remove overlay divs that might block clicks
+                var overlays = document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]');
+                overlays.forEach(function(el) {
+                    if (el.style.zIndex > 9998) { el.remove(); removed++; }
+                });
+                // Remove any backdrop/modal-open class from body
+                document.body.classList.remove('cky-modal-open', 'modal-open');
+                document.body.style.overflow = '';
+                return removed;
+            })()""")
+            logger.info(f"Cookie banner nuked: {cky_result} elements removed")
+        except Exception as e:
+            logger.warning(f"Cookie banner nuke failed: {e}")
+        
+        await asyncio.sleep(0.5)
+        
+        # 2. Strategy A: React onClick handler directly (most reliable)
+        try:
+            react_result = await browser_console("""(() => {
+                var b = document.querySelectorAll('button');
+                for (var i=0; i<b.length; i++) {
+                    var t = (b[i].textContent || '').trim();
+                    if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
+                        // Try React onClick handler
+                        var propKey = Object.keys(b[i]).find(k => k.startsWith('__reactProps'));
+                        if (propKey && b[i][propKey] && b[i][propKey].onClick) {
+                            try {
+                                b[i][propKey].onClick({preventDefault: function(){}, stopPropagation: function(){}});
+                                return 'react_onclick: ' + t;
+                            } catch(e) {
+                                b[i].click();
+                                b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                                return 'fallback_click: ' + t;
+                            }
                         }
+                        // No React handler found — force DOM click
+                        b[i].click();
+                        b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                        return 'dom_click: ' + t;
                     }
-                    b[i].click();
-                    b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                    return 'dom_click: ' + t;
                 }
-            }
-            return 'no_submit_button';
-        })()""")
-        logger.info(f"JS Submit click result: {js_result}")
-    else:
-        logger.info("Submit already clicked via browser_click_by_text — skipping JS fallback")
-
-    # Also try Playwright page.click() with force=True — only if not yet clicked
-    if not submit_clicked:
+                return 'no_submit_button';
+            })()""")
+            logger.info(f"React/JS Submit click: {react_result}")
+        except Exception as e:
+            logger.warning(f"React/JS click failed: {e}")
+        
+        # 3. Strategy B: Playwright force-click (bypasses overlays)
         try:
             from sin_browser_tools.core import manager
             page = manager.page
@@ -1019,7 +1034,21 @@ async def _playwright_onboarding() -> None:
                 await submit_btn.first.click(force=True, timeout=5000)
                 logger.info("Playwright force-click on Submit button succeeded")
         except Exception as e:
-            logger.info(f"Playwright force-click on Submit: {e}")
+            logger.info(f"Playwright force-click: {e}")
+        
+        # 4. Strategy C: browser_click_by_text as last resort
+        for txt in ("Submit to get $6 Credits", "Submit to get $5 Credits", "Submit"):
+            try:
+                await browser_click_by_text(txt, role="button")
+                logger.info(f"browser_click_by_text clicked '{txt}'")
+                break
+            except Exception:
+                continue
+
+    # First click attempt
+    submit_clicked = False
+    await _kill_cookie_banner_and_click_submit()
+    submit_clicked = True  # Assume clicked — we used 3 strategies
 
     # ── Multi-click Submit with long polling (up to 5 min per attempt) ──────
     # The Fireworks onboarding Submit button can take up to 5 minutes to
@@ -1028,30 +1057,8 @@ async def _playwright_onboarding() -> None:
     escaped_onboarding = False
     for click_round in range(3):
         if click_round > 0:
-            logger.info(f"=== Submit click round {click_round+1} — re-clicking Submit button ===")
-            # Re-click Submit
-            for txt in ("Submit to get $6 Credits", "Submit to get $5 Credits", "Submit", "Finish setup", "Complete profile", "Get started", "Get $5", "Get $6", "Finish", "Continue", "Complete onboarding"):
-                try:
-                    await browser_click_by_text(txt, role="button")
-                    logger.info(f"Re-clicked '{txt}' (round {click_round+1})")
-                    submit_clicked = True
-                    break
-                except Exception:
-                    continue
-            # Also try JS direct click
-            if not submit_clicked or True:
-                await browser_console("""(() => {
-                    var b = document.querySelectorAll('button');
-                    for (var i=0; i<b.length; i++) {
-                        var t = (b[i].textContent || '').trim();
-                        if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
-                            b[i].click();
-                            b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
-                            return t;
-                        }
-                    }
-                    return 'no_submit_button';
-                })()""")
+            logger.info(f"=== Submit click round {click_round+1} — nuking cookies + re-clicking Submit ===")
+            await _kill_cookie_banner_and_click_submit()
             await asyncio.sleep(2)
 
         # Poll every 2s for onboarding redirect (max 300s = 5 min per round)
