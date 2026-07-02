@@ -921,10 +921,18 @@ async def _playwright_onboarding() -> None:
     await asyncio.sleep(0.5)
 
     # ── Step 5: Use-case checkboxes (Page 2) ─────────────────────────────────
-    # ROOT CAUSE: Custom React checkboxes. DOM click() sets checked=True on the
-    # DOM element, but React's internal form state stays empty → POST /onboarding
-    # sends body={}. Fix: Find React fiber on each checkbox, call onClick prop
-    # directly with synthetic event. This is the ONLY way to update React state.
+    # ROOT CAUSE: Fireworks uses custom React checkboxes. Standard approaches
+    # (DOM click, Playwright label click) set checked=True on the DOM but
+    # don't update React's useState. The form submission reads from React's
+    # state, so POST /onboarding always sends body={}.
+    #
+    # FIX: For native <input type="checkbox"> elements, we need to:
+    # 1. Set the `checked` property via the React-internal value setter
+    # 2. Dispatch a native 'change' event (not 'click')
+    # This is the standard React hack to programmatically update controlled inputs.
+    #
+    # For custom [role="checkbox"] elements, we walk the React fiber tree to
+    # find the onClick prop and call it directly.
     use_cases = [
         "Prototype with open models",
         "Flexible capacity for experimentation",
@@ -932,69 +940,92 @@ async def _playwright_onboarding() -> None:
         "Search",
         "Agentic AI",
     ]
-    for uc in use_cases:
-        clicked = False
-        # Strategy 1: React fiber onClick (guaranteed to update React state)
-        try:
-            fiber_result = await browser_console(f"""(() => {{
-                // Find the label/div containing this text
-                var allEls = document.querySelectorAll('label, [role="checkbox"], div, span, p');
-                for (var i=0; i<allEls.length; i++) {{
-                    var txt = (allEls[i].textContent || '').trim();
-                    if (txt === {uc!r} || (txt.length < 60 && txt.indexOf({uc!r}) !== -1 && txt.indexOf('Credit') === -1)) {{
-                        // Find React fiber
-                        var fiberKey = Object.keys(allEls[i]).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-                        if (fiberKey) {{
-                            var fiber = allEls[i][fiberKey];
-                            // Walk up to find onClick or onChange prop
-                            var curr = fiber;
-                            for (var hop=0; hop<20 && curr; hop++) {{
-                                if (curr.memoizedProps) {{
-                                    if (typeof curr.memoizedProps.onClick === 'function') {{
-                                        curr.memoizedProps.onClick({{preventDefault:function(){{}},stopPropagation:function(){{}},target:allEls[i]}});
-                                        return 'fiber_onclick hop=' + hop;
-                                    }}
-                                    if (typeof curr.memoizedProps.onChange === 'function') {{
-                                        curr.memoizedProps.onChange({{preventDefault:function(){{}},stopPropagation:function(){{}},target:allEls[i]}});
-                                        return 'fiber_onchange hop=' + hop;
-                                    }}
-                                }}
-                                curr = curr.return;
-                            }}
-                            return 'no_handler_in_fiber';
-                        }}
-                        return 'no_fiber_key';
-                    }}
-                }}
-                return 'element_not_found';
-            }})()""")
-            r = fiber_result.get("result", "") if isinstance(fiber_result, dict) else str(fiber_result)
-            if r and r.startswith("fiber_"):
-                logger.info(f"Use-case '{uc}' clicked via React fiber ({r})")
-                clicked = True
-            else:
-                logger.info(f"Use-case '{uc}' fiber attempt: {r}")
-        except Exception as e:
-            logger.info(f"Use-case '{uc}' fiber error: {e}")
-        # Strategy 2: Playwright label click (may help if fiber doesn't have handler)
-        if not clicked:
-            try:
-                from sin_browser_tools.core import manager
-                page = manager.page
-                loc = page.locator(f'label:has-text("{uc}")').first
-                if await loc.count() > 0:
-                    await loc.click(force=True, timeout=3000)
-                    logger.info(f"Use-case '{uc}' clicked via Playwright label locator")
-                    clicked = True
-            except Exception as e:
-                logger.info(f"Playwright label click for '{uc}': {e}")
-        # Strategy 3: JS click as last resort
-        if not clicked:
-            if not await _click_checkbox_any_strategy(uc):
-                logger.warning(f"Use-case '{uc}' not found via any strategy")
-            else:
-                clicked = True
-        await asyncio.sleep(0.3)
+
+    # AGGRESSIVE APPROACH: Find ALL unchecked checkboxes on the page that look
+    # like use-case checkboxes (not the Terms checkbox), and update their
+    # React state using the native input value setter hack.
+    try:
+        bulk_result = await browser_console("""(() => {
+            var updated = 0;
+            // 1. For native <input type="checkbox"> elements: use React's internal setter
+            var inputs = document.querySelectorAll('input[type="checkbox"]');
+            for (var i=0; i<inputs.length; i++) {
+                if (inputs[i].checked) continue;  // skip already-checked
+                // Find React fiber
+                var fiberKey = Object.keys(inputs[i]).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                if (!fiberKey) continue;
+                var fiber = inputs[i][fiberKey];
+                // Walk up to find props with onChange
+                var curr = fiber;
+                var foundOnChange = null;
+                for (var hop=0; hop<15 && curr; hop++) {
+                    if (curr.memoizedProps && typeof curr.memoizedProps.onChange === 'function') {
+                        foundOnChange = curr.memoizedProps.onChange;
+                        break;
+                    }
+                    curr = curr.return;
+                }
+                if (foundOnChange) {
+                    // Use the native input value setter hack
+                    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
+                    nativeInputValueSetter.call(inputs[i], true);
+                    inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
+                    updated++;
+                }
+            }
+            // 2. For [role="checkbox"] elements: find fiber and call onClick/onChange
+            var roles = document.querySelectorAll('[role="checkbox"]');
+            for (var j=0; j<roles.length; j++) {
+                if (roles[j].getAttribute('aria-checked') === 'true') continue;
+                var rFiberKey = Object.keys(roles[j]).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                if (!rFiberKey) continue;
+                var rFiber = roles[j][rFiberKey];
+                var rcurr = rFiber;
+                for (var rhop=0; rhop<15 && rcurr; rhop++) {
+                    if (rcurr.memoizedProps) {
+                        if (typeof rcurr.memoizedProps.onClick === 'function') {
+                            rcurr.memoizedProps.onClick({preventDefault:function(){},stopPropagation:function(){},target:roles[j]});
+                            updated++;
+                            break;
+                        }
+                        if (typeof rcurr.memoizedProps.onChange === 'function') {
+                            rcurr.memoizedProps.onChange({preventDefault:function(){},stopPropagation:function(){},target:roles[j]});
+                            updated++;
+                            break;
+                        }
+                    }
+                    rcurr = rcurr.return;
+                }
+            }
+            return updated;
+        })()""")
+        r = bulk_result.get("result", 0) if isinstance(bulk_result, dict) else 0
+        updated_count = int(r) if str(r).isdigit() else 0
+        logger.info(f"Bulk React-state update: {updated_count} checkboxes updated")
+        if updated_count == 0:
+            # Fallback: use the text-matching approach
+            for uc in use_cases:
+                clicked = False
+                try:
+                    from sin_browser_tools.core import manager
+                    page = manager.page
+                    loc = page.locator(f'label:has-text("{uc}")').first
+                    if await loc.count() > 0:
+                        await loc.click(force=True, timeout=3000)
+                        logger.info(f"Use-case '{uc}' clicked via Playwright label locator (fallback)")
+                        clicked = True
+                except Exception as e:
+                    logger.info(f"Playwright fallback for '{uc}': {e}")
+                if not clicked:
+                    if not await _click_checkbox_any_strategy(uc):
+                        logger.warning(f"Use-case '{uc}' not found via any strategy")
+                await asyncio.sleep(0.3)
+    except Exception as e:
+        logger.warning(f"Bulk checkbox update failed: {e}")
+        # Fallback to original approach
+        for uc in use_cases:
+            await _click_checkbox_any_strategy(uc)
+            await asyncio.sleep(0.2)
 
     # Verify checkbox states — log which are actually checked
     try:
