@@ -968,7 +968,7 @@ async def _playwright_onboarding() -> None:
         pass
 
     submit_clicked = False
-    for txt in ("Submit to get $5 Credits", "Submit", "Skip", "Finish setup", "Complete profile", "Get started", "Get $5", "Finish", "Continue", "Complete onboarding"):
+    for txt in ("Submit to get $6 Credits", "Submit to get $5 Credits", "Submit", "Skip", "Finish setup", "Complete profile", "Get started", "Get $5", "Get $6", "Finish", "Continue", "Complete onboarding"):
         try:
             await browser_click_by_text(txt, role="button")
             logger.info(f"Page 2 submit clicked via '{txt}'")
@@ -1014,27 +1014,63 @@ async def _playwright_onboarding() -> None:
         try:
             from sin_browser_tools.core import manager
             page = manager.page
-            submit_btn = page.locator('button:has-text("Submit to get $6 Credits"), button:has-text("Submit to get $5 Credits")')
+            submit_btn = page.locator('button:has-text("Submit to get $6 Credits"), button:has-text("Submit to get $5 Credits"), button:has-text("Submit")')
             if await submit_btn.count() > 0:
                 await submit_btn.first.click(force=True, timeout=5000)
                 logger.info("Playwright force-click on Submit button succeeded")
         except Exception as e:
             logger.info(f"Playwright force-click on Submit: {e}")
 
-    # Poll every 1s for onboarding redirect (max 60s)
-    for attempt in range(60):
-        await asyncio.sleep(1)
-        url = (await browser_get_url())["url"]
-        if 'onboarding' not in url:
-            logger.info(f"Redirect after Submit (poll {attempt+1}/60, {attempt+1}s): {url[:60]}")
-            # CRITICAL: URL changed but page may still be loading.
-            # Wait for page to fully render before proceeding.
-            logger.info("Waiting 8s for page to fully load after onboarding redirect...")
-            await asyncio.sleep(8)
-            break
-        logger.info(f"Onboarding poll {attempt+1}/60 — still on /onboarding ({attempt+1}s)")
+    # ── Multi-click Submit with long polling (up to 5 min per attempt) ──────
+    # The Fireworks onboarding Submit button can take up to 5 minutes to
+    # process. If the first click doesn't redirect, click AGAIN after the
+    # poll window expires. Up to 3 click attempts, 300s each.
+    escaped_onboarding = False
+    for click_round in range(3):
+        if click_round > 0:
+            logger.info(f"=== Submit click round {click_round+1} — re-clicking Submit button ===")
+            # Re-click Submit
+            for txt in ("Submit to get $6 Credits", "Submit to get $5 Credits", "Submit", "Finish setup", "Complete profile", "Get started", "Get $5", "Get $6", "Finish", "Continue", "Complete onboarding"):
+                try:
+                    await browser_click_by_text(txt, role="button")
+                    logger.info(f"Re-clicked '{txt}' (round {click_round+1})")
+                    submit_clicked = True
+                    break
+                except Exception:
+                    continue
+            # Also try JS direct click
+            if not submit_clicked or True:
+                await browser_console("""(() => {
+                    var b = document.querySelectorAll('button');
+                    for (var i=0; i<b.length; i++) {
+                        var t = (b[i].textContent || '').trim();
+                        if (t.indexOf('Submit') !== -1 && t.indexOf('Skip') === -1) {
+                            b[i].click();
+                            b[i].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                            return t;
+                        }
+                    }
+                    return 'no_submit_button';
+                })()""")
+            await asyncio.sleep(2)
 
-    # If still on /onboarding, try direct API call to complete onboarding
+        # Poll every 2s for onboarding redirect (max 300s = 5 min per round)
+        for attempt in range(150):
+            await asyncio.sleep(2)
+            url = (await browser_get_url())["url"]
+            if 'onboarding' not in url:
+                logger.info(f"Redirect after Submit (round {click_round+1}, poll {attempt+1}/150, {(attempt+1)*2}s): {url[:60]}")
+                logger.info("Waiting 8s for page to fully load after onboarding redirect...")
+                await asyncio.sleep(8)
+                escaped_onboarding = True
+                break
+            if attempt % 15 == 0:
+                logger.info(f"Onboarding poll round {click_round+1} {attempt+1}/150 — still on /onboarding ({(attempt+1)*2}s)")
+
+        if escaped_onboarding:
+            break
+
+    # If still on /onboarding after 3 click rounds, try direct API call
     url = (await browser_get_url())["url"]
     if 'onboarding' in url:
         # 1. First check: did React fire a fetch that we captured via interceptor?
@@ -1215,7 +1251,7 @@ async def _playwright_onboarding() -> None:
             logger.info("Enter key sent as Submit fallback")
             await asyncio.sleep(1)
 
-    # Final long wait: poll every 1s, max 30s
+    # Final long wait: poll every 2s, max 60s
     for _ in range(30):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
