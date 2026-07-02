@@ -18,7 +18,9 @@ from agent_toolbox.core.keychain_store import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_POOL_PATH = Path(__file__).parent.parent.parent / "data" / "fireworksai-pool.json"
+_V3_POOL = Path(__file__).parent.parent.parent.parent / "SIN-Rotator-SINator-FireworksAI" / "data" / "fireworksai-pool.json"
+_V2_POOL = Path(__file__).parent.parent.parent / "data" / "fireworksai-pool.json"
+DEFAULT_POOL_PATH = _V3_POOL if _V3_POOL.exists() else _V2_POOL
 
 
 class PoolManager:
