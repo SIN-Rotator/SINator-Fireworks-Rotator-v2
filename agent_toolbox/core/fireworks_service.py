@@ -910,36 +910,70 @@ async def _playwright_onboarding() -> None:
         await asyncio.sleep(0.2)
 
     # NUCLEAR FIX: React controlled checkbox hack
-    # Standard DOM click() doesn't update React's useState for controlled inputs.
-    # Fix: For EACH unchecked <input type="checkbox">, use the native value setter
-    # to set checked=true, then dispatch a bubbling 'change' event. This is the
-    # same technique React Testing Library uses internally.
+    # Only target the 5 use-case checkboxes, NOT "Other" or Terms.
+    # The use-case section is after the Terms checkbox. We find it by looking
+    # for checkboxes that are within the use-case area (near the text labels).
+    # Strategy: find all checkboxes, skip the first one (Terms), then check
+    # which ones are near use-case text. Only set those.
     try:
         fix_result = await browser_console("""(() => {
             var set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked').set;
             var inputs = document.querySelectorAll('input[type="checkbox"]');
             var fixed = 0;
+
+            // Build a map of checkbox positions
+            var checkboxes = [];
             for (var i=0; i<inputs.length; i++) {
-                if (inputs[i].checked) continue;
-                set.call(inputs[i], true);
-                inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
-                fixed++;
+                var rect = inputs[i].getBoundingClientRect();
+                checkboxes.push({
+                    el: inputs[i],
+                    idx: i,
+                    checked: inputs[i].checked,
+                    x: rect.x, y: rect.y, w: rect.width, h: rect.height,
+                    // Get nearby text
+                    nearby: (inputs[i].closest('label') || inputs[i].parentElement || {}).textContent || ''
+                });
             }
-            // Also fix [role="checkbox"] elements: set aria-checked + dispatch click
-            var roles = document.querySelectorAll('[role="checkbox"]');
-            for (var j=0; j<roles.length; j++) {
-                if (roles[j].getAttribute('aria-checked') === 'true') continue;
-                roles[j].setAttribute('aria-checked', 'true');
-                // Dispatch both click and change events
-                roles[j].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                roles[j].dispatchEvent(new Event('change', { bubbles: true }));
-                fixed++;
+
+            // Find the Terms checkbox (first one, near "agree" text)
+            var termsIdx = -1;
+            for (var i=0; i<checkboxes.length; i++) {
+                if (checkboxes[i].nearby.toLowerCase().indexOf('agree') !== -1 ||
+                    checkboxes[i].nearby.toLowerCase().indexOf('terms') !== -1) {
+                    termsIdx = i;
+                    break;
+                }
             }
+
+            // Find use-case text patterns
+            var useCasePatterns = [
+                'prototype', 'flexible', 'conversational', 'search', 'agentic'
+            ];
+
+            // For each unchecked checkbox (skip Terms), check if it's near
+            // a use-case text. Only set it if it matches.
+            for (var i=0; i<checkboxes.length; i++) {
+                if (i === termsIdx) continue;  // Skip Terms
+                if (checkboxes[i].checked) continue;
+
+                // Check if nearby text contains a use-case pattern
+                var nearby = checkboxes[i].nearby.toLowerCase();
+                var isUseCase = useCasePatterns.some(function(p) {
+                    return nearby.indexOf(p) !== -1;
+                });
+
+                if (isUseCase) {
+                    set.call(checkboxes[i].el, true);
+                    checkboxes[i].el.dispatchEvent(new Event('change', { bubbles: true }));
+                    fixed++;
+                }
+            }
+
             return fixed;
         })()""")
         r = fix_result.get("result", 0) if isinstance(fix_result, dict) else 0
         n = int(r) if str(r).isdigit() else 0
-        logger.info(f"React controlled checkbox hack: {n} checkboxes fixed")
+        logger.info(f"React controlled checkbox hack (use-cases only): {n} checkboxes fixed")
         await asyncio.sleep(0.3)
     except Exception as e:
         logger.warning(f"Checkbox hack failed: {e}")
