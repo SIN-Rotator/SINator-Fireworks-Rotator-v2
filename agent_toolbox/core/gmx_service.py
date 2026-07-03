@@ -1051,32 +1051,84 @@ class GmxService:
             })
             await asyncio.sleep(3)
 
-            # 6) Confirm-Dialog (OK)
-            ok_pos = await frame.evaluate("""() => {
-                var allEls = document.querySelectorAll('button, a, span');
-                for (var i=0; i<allEls.length; i++) {
-                    var el = allEls[i];
-                    if (el.textContent && el.textContent.trim() === 'OK') {
-                        var r = el.getBoundingClientRect();
-                        if (r.width > 5 && r.height > 5) {
-                            return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
+            # DEBUG: Screenshot after delete click
+            try:
+                import time as _time
+                ss_name = f"/tmp/gmx_delete_{int(_time.time())}.png"
+                await page.screenshot(path=ss_name)
+                logger.info(f"[DEBUG] Screenshot after delete click: {ss_name}")
+            except Exception as ss_err:
+                logger.warning(f"Screenshot failed: {ss_err}")
+
+            # 6) Confirm-Dialog — search in BOTH iframe AND parent page
+            # GMX modal may be outside the allEmailAddresses iframe
+            confirm_found = False
+            for confirm_text in ['OK', 'Ok', 'Ja', 'Bestätigen', 'Löschen', 'Confirm', 'Yes']:
+                # First try iframe
+                ok_pos = await frame.evaluate(f"""() => {{
+                    var allEls = document.querySelectorAll('button, a, span, input[type="submit"], input[type="button"]');
+                    for (var i=0; i<allEls.length; i++) {{
+                        var el = allEls[i];
+                        var txt = (el.textContent || '').trim();
+                        var val = (el.value || '').trim();
+                        if (txt === '{confirm_text}' || val === '{confirm_text}') {{
+                            var r = el.getBoundingClientRect();
+                            if (r.width > 5 && r.height > 5) {{
+                                return {{x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2), src: 'iframe'}};
+                            }}
+                        }}
+                    }}
+                    return null;
+                }}""")
+                # If not in iframe, try parent page
+                if not ok_pos:
+                    ok_pos = await page.evaluate(f"""() => {{
+                        var allEls = document.querySelectorAll('button, a, span, input[type="submit"], input[type="button"]');
+                        for (var i=0; i<allEls.length; i++) {{
+                            var el = allEls[i];
+                            var txt = (el.textContent || '').trim();
+                            var val = (el.value || '').trim();
+                            if (txt === '{confirm_text}' || val === '{confirm_text}') {{
+                                var r = el.getBoundingClientRect();
+                                if (r.width > 5 && r.height > 5) {{
+                                    return {{x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2), src: 'parent'}};
+                                }}
+                            }}
+                        }}
+                        return null;
+                    }}""")
+                if ok_pos:
+                    logger.info(f"Confirm '{confirm_text}' at ({ok_pos['x']}, {ok_pos['y']}) src={ok_pos.get('src', '?')}")
+                    await cdp.send('Input.dispatchMouseEvent', {
+                        'type': 'mousePressed', 'x': ok_pos['x'], 'y': ok_pos['y'],
+                        'button': 'left', 'clickCount': 1
+                    })
+                    await asyncio.sleep(0.05)
+                    await cdp.send('Input.dispatchMouseEvent', {
+                        'type': 'mouseReleased', 'x': ok_pos['x'], 'y': ok_pos['y'],
+                        'button': 'left', 'clickCount': 1
+                    })
+                    await asyncio.sleep(2)
+                    confirm_found = True
+                    break
+            if not confirm_found:
+                # Last resort: JS click on any visible OK-like button in parent page
+                clicked = await page.evaluate("""() => {
+                    var btns = document.querySelectorAll('button');
+                    for (var i = 0; i < btns.length; i++) {
+                        var txt = (btns[i].textContent || '').trim().toUpperCase();
+                        if (txt === 'OK' || txt === 'BESTÄTIGEN' || txt === 'LÖSCHEN') {
+                            btns[i].click();
+                            return true;
                         }
                     }
-                }
-                return null;
-            }""")
-            if ok_pos:
-                logger.info(f"OK confirm at ({ok_pos['x']}, {ok_pos['y']})")
-                await cdp.send('Input.dispatchMouseEvent', {
-                    'type': 'mousePressed', 'x': ok_pos['x'], 'y': ok_pos['y'],
-                    'button': 'left', 'clickCount': 1
-                })
-                await asyncio.sleep(0.05)
-                await cdp.send('Input.dispatchMouseEvent', {
-                    'type': 'mouseReleased', 'x': ok_pos['x'], 'y': ok_pos['y'],
-                    'button': 'left', 'clickCount': 1
-                })
-                await asyncio.sleep(2)
+                    return false;
+                }""")
+                if clicked:
+                    logger.info("Confirm clicked via JS fallback on parent page")
+                    await asyncio.sleep(2)
+                else:
+                    logger.info("No confirm dialog found")
 
             # 7) Verifikation
             for _ in range(10):
