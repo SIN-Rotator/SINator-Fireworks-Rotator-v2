@@ -9,12 +9,21 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from agent_toolbox.core.keychain_store import (
-    store_key as _store_to_keychain,
-    retrieve_key as _retrieve_from_keychain,
-    delete_key as _delete_from_keychain,
-    SENTINEL as _KEYCHAIN_SENTINEL,
-)
+from agent_toolbox.core.keychain_store import SENTINEL as _KEYCHAIN_SENTINEL
+
+# Optional keychain import — never blocks pool operations
+try:
+    from agent_toolbox.core.keychain_store import (
+        store_key as _store_to_keychain,
+        retrieve_key as _retrieve_from_keychain,
+        delete_key as _delete_from_keychain,
+    )
+    _HAS_KEYCHAIN = True
+except Exception:
+    _HAS_KEYCHAIN = False
+    _store_to_keychain = None
+    _retrieve_from_keychain = None
+    _delete_from_keychain = None
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +99,10 @@ class PoolManager:
         """
         self.reload()
         key_id = str(uuid.uuid4())
-        _store_to_keychain(key_id, api_key)
+        # Store actual key directly in pool JSON — NEVER rely on Keychain alone
         key_entry = {
             "id": key_id,
-            "api_key": _KEYCHAIN_SENTINEL,
+            "api_key": api_key,
             "alias_email": alias_email,
             "key_name": key_name,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -103,6 +112,13 @@ class PoolManager:
             "credits_remaining": credits_initial,
             "credits_checked_at": None,
         }
+
+        # Optional Keychain backup (best-effort, never blocks)
+        if _HAS_KEYCHAIN and _store_to_keychain:
+            try:
+                _store_to_keychain(key_id, api_key)
+            except Exception as e:
+                logger.warning(f"Keychain backup failed (non-critical): {e}")
 
         self.keys.append(key_entry)
         self.save()
@@ -130,12 +146,26 @@ class PoolManager:
         return None
 
     def _hydrate_key(self, key: Dict[str, Any]) -> Dict[str, Any]:
-        """Return a copy of the key dict with api_key hydrated from Keychain."""
+        """Return a copy of the key dict with api_key populated.
+        
+        Source of truth: pool JSON api_key field.
+        If api_key is SENTINEL (old Keychain-migrated key), try Keychain as
+        fallback. If Keychain is empty, return empty string (key is lost).
+        """
         out = dict(key)
         api_key = out.get("api_key", "")
-        if api_key == _KEYCHAIN_SENTINEL:
-            real = _retrieve_from_keychain(out["id"])
-            out["api_key"] = real or ""
+        if api_key and api_key != _KEYCHAIN_SENTINEL:
+            return out
+        # SENTINEL or empty — try Keychain fallback (best-effort)
+        if _HAS_KEYCHAIN and _retrieve_from_keychain:
+            try:
+                real = _retrieve_from_keychain(out["id"])
+                if real:
+                    out["api_key"] = real
+                    return out
+            except Exception:
+                pass
+        # Keychain failed or unavailable — keep whatever is in JSON
         return out
 
     def mark_suspended(self, key_id: str, reason: str = "unknown") -> bool:
@@ -198,7 +228,7 @@ class PoolManager:
                 "id": k["id"],
                 "alias_email": k["alias_email"],
                 "key_name": k["key_name"],
-                "api_key": "",
+                "api_key": f"****{k.get('api_key', '')[-4:]}" if k.get("api_key") else "",
                 "created_at": k["created_at"],
                 "used": k.get("used", False),
                 "used_at": k.get("used_at"),
@@ -256,7 +286,11 @@ class PoolManager:
         initial_len = len(self.keys)
         self.keys = [k for k in self.keys if k["id"] != key_id]
         if len(self.keys) < initial_len:
-            _delete_from_keychain(key_id)
+            if _HAS_KEYCHAIN and _delete_from_keychain:
+                try:
+                    _delete_from_keychain(key_id)
+                except Exception:
+                    pass
             self.save()
             logger.info(f"API-Key gelöscht: {key_id[:8]}...")
             return True
