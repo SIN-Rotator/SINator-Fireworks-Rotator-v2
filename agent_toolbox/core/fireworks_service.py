@@ -7,6 +7,7 @@ Docs: fireworks_service.doc.md
 """
 import asyncio
 import logging
+import os
 import re
 import weakref
 from typing import Dict, Any, Optional
@@ -578,7 +579,6 @@ async def _playwright_onboarding() -> None:
     from sin_browser_tools.tools.navigation import browser_get_url, browser_navigate, browser_press
     from sin_browser_tools.tools.extraction import browser_console
 
-    import os
     # ── Step 1: Dismiss cookie banner ─────────────────────────────────────
     # The init_script in launch() already prevents it, but call the reactive
     # fallback in case CookieYes ignored localStorage.
