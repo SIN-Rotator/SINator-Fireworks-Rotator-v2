@@ -205,6 +205,7 @@ async def main():
         logger.info("=== Launching Bot Chrome via SIN-Browser-Tools ===")
         from fireworks_service import launch, cleanup_bot, signup_fireworks
         from fireworks_service import verify_account, create_api_key, login_fireworks
+        from fireworks_service import check_credits, add_billing
 
         launch_result = await launch()
         fw_mgr = launch_result.get("browser_manager")
@@ -295,6 +296,23 @@ async def main():
         if login_result.get('status') != 'success':
             logger.error(f"Login failed after verify: {login_result.get('error')}")
             return
+
+        # Step 4.5: Credit check + billing fallback
+        logger.info("=== Checking Credits ===")
+        credit_result = await check_credits()
+        credits = credit_result.get("credits", 0.0)
+        has_credits = credit_result.get("has_credits", False)
+        logger.info(f"Credits: ${credits:.2f} (has_credits={has_credits})")
+
+        if not has_credits:
+            logger.info("No free credits — attempting billing step via Chrome CDP...")
+            billing_result = await add_billing(alias, args.password)
+            billing_status = billing_result.get("status")
+            logger.info(f"Billing result: {billing_status} — {billing_result.get('message', billing_result.get('error', ''))}")
+            if billing_status == "hcaptcha_pending":
+                logger.warning("hCaptcha detected — manual intervention may be needed")
+        else:
+            logger.info(f"Free credits available (${credits:.2f}) — skipping billing")
 
         # Step 5: API Key
         logger.info("=== API Key ===")
