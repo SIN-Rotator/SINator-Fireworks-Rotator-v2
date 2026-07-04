@@ -72,37 +72,85 @@ async def main():
         logger.info("Connected to User Chrome")
     else:
         cdp_port = _find_free_port()
-        gmx_browser = await p.chromium.launch(
-            headless=False,
-            args=[f'--remote-debugging-port={cdp_port}']
-        )
+        docker_profile = os.environ.get("SIN_DOCKER_PROFILE", "")
+        if docker_profile and os.path.isdir(docker_profile):
+            logger.info(f"Docker mode: launching Chromium with persistent profile at {docker_profile}")
+            ctx = await p.chromium.launch_persistent_context(
+                user_data_dir=docker_profile,
+                headless=False,
+                channel="chromium",
+                args=[
+                    f'--remote-debugging-port={cdp_port}',
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--password-store=basic',
+                ]
+            )
+            gmx_browser = ctx  # persistent context IS the browser+context
+        else:
+            gmx_browser = await p.chromium.launch(
+                headless=False,
+                args=[
+                    f'--remote-debugging-port={cdp_port}',
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                ]
+            )
 
     fw_mgr = None
     alias = None
     ctx = None
     work_tab = None
+    inbox_tab = None
     created_ctx = False
+    persistent_ctx = False  # True when using launch_persistent_context (Docker)
     try:
         from gmx_service import GmxService
         gmx = GmxService()
 
-        # Bug 1 fix: use existing context (browser.contexts[0]) when connecting via CDP
-        # so GMX session cookies persist between runs. Only create new context when
-        # launching a fresh browser (no CDP).
-        if args.cdp_port and gmx_browser.contexts:
+        # launch_persistent_context returns a BrowserContext, not a Browser
+        docker_profile = os.environ.get("SIN_DOCKER_PROFILE", "")
+        if docker_profile and os.path.isdir(docker_profile):
+            # Docker: gmx_browser IS the context (from launch_persistent_context)
+            ctx = gmx_browser
+            persistent_ctx = True
+            # Set viewport for coordinate-based consent click
+            for page in ctx.pages:
+                await page.set_viewport_size({"width": 1920, "height": 1080})
+            logger.info(f"Using persistent context with {len(ctx.pages)} existing pages")
+            if ctx.pages:
+                work_tab = ctx.pages[0]
+                logger.info(f"Reusing existing page: {work_tab.url[:60]}")
+            else:
+                work_tab = await ctx.new_page()
+                await work_tab.set_viewport_size({"width": 1920, "height": 1080})
+        elif args.cdp_port and gmx_browser.contexts:
+            # CDP: use existing context
             ctx = gmx_browser.contexts[0]
+            for page in ctx.pages:
+                await page.set_viewport_size({"width": 1920, "height": 1080})
             logger.info(f"Using existing browser context ({len(ctx.pages)} pages)")
             if ctx.pages:
                 work_tab = ctx.pages[0]
                 logger.info(f"Reusing existing page: {work_tab.url[:60]}")
             else:
                 work_tab = await ctx.new_page()
+                await work_tab.set_viewport_size({"width": 1920, "height": 1080})
         else:
-            ctx = await gmx_browser.new_context()
+            ctx = await gmx_browser.new_context(
+                viewport={"width": 1920, "height": 1080}
+            )
             created_ctx = True
             work_tab = await ctx.new_page()
         gmx.work_tab = work_tab
-        gmx.inbox_tab = work_tab
+
+        # Create SEPARATE inbox tab — alias rotation navigates work_tab away
+        inbox_tab = await ctx.new_page()
+        await inbox_tab.set_viewport_size({"width": 1920, "height": 1080})
+        gmx.inbox_tab = inbox_tab
+        logger.info(f"Created separate inbox tab: {inbox_tab.url[:60]}")
         await work_tab.bring_to_front()
 
         # Step 0: GMX Login (with retry — Bug 4 fix)
@@ -156,7 +204,7 @@ async def main():
         # ══════════════════════════════════════════════════════════════
         logger.info("=== Launching Bot Chrome via SIN-Browser-Tools ===")
         from fireworks_service import launch, cleanup_bot, signup_fireworks
-        from fireworks_service import verify_account, create_api_key
+        from fireworks_service import verify_account, create_api_key, login_fireworks
 
         launch_result = await launch()
         fw_mgr = launch_result.get("browser_manager")
@@ -176,12 +224,49 @@ async def main():
 
         # Step 3: OTP Poll (User Chrome)
         logger.info("=== OTP Polling (User Chrome) ===")
-        await work_tab.bring_to_front()
-        await work_tab.goto(gmx_work_url, wait_until="domcontentloaded")
-        await asyncio.sleep(1)
-        # Refresh once so the verify email from the Fireworks signup shows up
-        await work_tab.reload(wait_until="domcontentloaded")
-        await asyncio.sleep(0.5)
+        # Both tabs share the same BrowserContext → cookies from work_tab's login
+        # are available to inbox_tab. Navigate to homepage, then click "Zum Postfach".
+        # NEVER call _login() on inbox_tab — it opens a duplicate login window.
+        await gmx.inbox_tab.bring_to_front()
+        await gmx.inbox_tab.goto("https://www.gmx.net/", wait_until="domcontentloaded")
+        await asyncio.sleep(3)
+        inbox_url = gmx.inbox_tab.url
+        logger.info(f"Inbox tab homepage URL: {inbox_url[:80]}")
+        
+        # Click "Zum Postfach" to reach the webmail client
+        postfach_clicked = False
+        try:
+            postfach = gmx.inbox_tab.locator('text=Zum Postfach')
+            if await postfach.count() > 0 and await postfach.first.is_visible(timeout=5000):
+                await postfach.first.click()
+                postfach_clicked = True
+                logger.info("Clicked 'Zum Postfach'")
+        except Exception as e:
+            logger.debug(f"Zum Postfach not found: {e}")
+        
+        if not postfach_clicked:
+            # Fallback: navigate directly to navigator.gmx.net/mail
+            await gmx.inbox_tab.goto("https://navigator.gmx.net/mail", wait_until="domcontentloaded")
+            logger.info("Navigated to navigator.gmx.net/mail")
+        
+        await asyncio.sleep(5)
+        inbox_url = gmx.inbox_tab.url
+        logger.info(f"Inbox tab URL after navigation: {inbox_url[:80]}")
+
+        # Wait for the mail frame (webmailer.gmx.net) to appear
+        logger.info("Waiting for mail frame to load...")
+        mail_frame_found = False
+        for _wait in range(15):
+            for f in gmx.inbox_tab.frames:
+                if f.name == "mail" or "webmailer.gmx.net" in (f.url or ""):
+                    mail_frame_found = True
+                    logger.info(f"Mail frame found: {f.url[:60]}")
+                    break
+            if mail_frame_found:
+                break
+            await asyncio.sleep(1)
+        if not mail_frame_found:
+            logger.warning("Mail frame not found after 15s, proceeding anyway...")
 
         verify_ok = False
         otp_url = None
@@ -200,18 +285,16 @@ async def main():
         else:
             logger.warning(f"OTP nicht gefunden: {otp_result.get('error')}")
 
-        # Step 4: Login + Onboarding (verify URL does NOT establish session)
-        logger.info("=== Fireworks Login + Onboarding ===")
-        from fireworks_service import login_fireworks
-        login_result = await login_fireworks(alias, args.password)
-        if login_result.get('status') == 'success':
-            logger.info(f"Login OK: {login_result.get('steps_completed', [])}")
-        else:
-            logger.info(f"Login: {login_result.get('status')} - {login_result.get('error', '')}")
+        # Step 4: Login after verify (session doesn't persist from signup)
+        logger.info("Waiting 3s for account activation after verify...")
+        await asyncio.sleep(3)
 
-        # Wait for account to be fully provisioned after onboarding
-        logger.info("Waiting 5s for account to settle before API key creation...")
-        await asyncio.sleep(5)
+        logger.info("=== Login after verify ===")
+        login_result = await login_fireworks(alias, args.password)
+        logger.info(f"Login: {login_result.get('status')} - steps: {login_result.get('steps_completed')}")
+        if login_result.get('status') != 'success':
+            logger.error(f"Login failed after verify: {login_result.get('error')}")
+            return
 
         # Step 5: API Key
         logger.info("=== API Key ===")
@@ -253,12 +336,13 @@ async def main():
         if fw_mgr:
             logger.info("Closing Bot Chrome (Fireworks)")
             await cleanup_bot(fw_mgr)
-        # Bug 2 fix: close work_tab to prevent page accumulation
-        if work_tab and not args.cdp_port:
-            try:
-                await work_tab.close()
-            except Exception:
-                pass
+        # Close inbox_tab and work_tab
+        for tab in [inbox_tab, work_tab]:
+            if tab and not args.cdp_port:
+                try:
+                    await tab.close()
+                except Exception:
+                    pass
         if created_ctx and ctx:
             try:
                 await ctx.close()
@@ -267,6 +351,9 @@ async def main():
         if gmx_browser:
             if args.cdp_port:
                 logger.info("Disconnecting from User Chrome (CDP — NOT closing)")
+            elif persistent_ctx:
+                logger.info("Closing persistent Chrome context (Docker)")
+                await gmx_browser.close()
             else:
                 logger.info("Closing User Chrome (GMX)")
                 await gmx_browser.close()

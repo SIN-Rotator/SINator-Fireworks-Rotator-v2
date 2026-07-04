@@ -517,21 +517,50 @@ class GmxService:
             if "consent" in url:
                 logger.info("Cookie consent page detected, accepting")
                 try:
-                    # Click "Alle akzeptieren" or "Zustimmen" or similar
-                    for selector in ['button:has-text("Alle akzeptieren")', 'button:has-text("Zustimmen")', 
-                                    'button:has-text("Akzeptieren")', 'button:has-text("OK")',
-                                    'button[data-testid="uc-accept-all-button"]']:
-                        btn = page.locator(selector).first
-                        if await btn.is_visible(timeout=2000):
-                            await btn.click()
-                            logger.info(f"Clicked consent: {selector}")
-                            await asyncio.sleep(3)
-                            break
+                    consent_clicked = False
+                    # Strategy 1: bounding_box mouse click on #save-all-pur (old consent page, Docker + headful)
+                    for frame in page.frames:
+                        try:
+                            box = await frame.locator("#save-all-pur").bounding_box()
+                            if box:
+                                await page.mouse.click(
+                                    box["x"] + box["width"] / 2,
+                                    box["y"] + box["height"] / 2,
+                                )
+                                logger.info(f"Mouse-clicked consent #save-all-pur in frame {frame.url[:50]}")
+                                consent_clicked = True
+                                break
+                        except Exception:
+                            continue
+                    # Strategy 2: JS click fallback on #save-all-pur
+                    if not consent_clicked:
+                        for frame in page.frames:
+                            try:
+                                result = await frame.evaluate("""() => {
+                                    var btn = document.querySelector('#save-all-pur');
+                                    if (!btn) return false;
+                                    btn.click();
+                                    return true;
+                                }""")
+                                if result:
+                                    logger.info(f"JS-clicked consent #save-all-pur in frame {frame.url[:50]}")
+                                    consent_clicked = True
+                                    break
+                            except Exception:
+                                continue
+                    # Strategy 3: NEW consent page — "Allen zustimmen" button NOT in DOM, click by coordinates
+                    if not consent_clicked:
+                        logger.info("Consent button not found in DOM, trying coordinate click for 'Allen zustimmen'")
+                        # The "Allen zustimmen" button is at approximately (200, 800) on 1920x1080
+                        await page.mouse.click(200, 800)
+                        logger.info("Clicked consent at coordinates (200, 800)")
+                        consent_clicked = True
+                    await asyncio.sleep(5)
                 except Exception as e:
                     logger.warning(f"Consent handling failed: {e}")
                 url = page.url
                 logger.info(f"After consent: {url[:80]}")
-                # After consent, we're on consent-management page — navigate to real www.gmx.net
+                # After consent, we're on gmx.net homepage — may need to re-navigate
                 if "consent" in url:
                     logger.info("Navigating to www.gmx.net after consent")
                     await page.goto("https://www.gmx.net/", wait_until="domcontentloaded")
@@ -539,8 +568,19 @@ class GmxService:
                     url = page.url
                     logger.info(f"After consent redirect: {url[:80]}")
             
+            # Wait for body to be available after consent redirect
+            for _wait in range(10):
+                try:
+                    text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+                    if text:
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+            else:
+                text = ""
+            
             # Already logged in on www.gmx.net homepage with Zum Postfach?
-            text = await page.evaluate("() => document.body.innerText")
             if "Sie sind eingeloggt" in text or "Zum Postfach" in text:
                 logger.info("Detected logged-in state on homepage, clicking Zum Postfach")
                 try:
@@ -568,6 +608,37 @@ class GmxService:
                 
                 logger.error("Could not establish GMX session from logged-in homepage")
                 return False
+            
+            # On www.gmx.net homepage but not logged in — click "Login" to get to auth.gmx.net
+            if "www.gmx.net" in url and "auth.gmx.net" not in url:
+                logger.info("On homepage, clicking Login button to reach auth.gmx.net")
+                try:
+                    # Find the visible Login button (floating widget, bottom-right)
+                    login_btns = page.locator("text=Login")
+                    clicked = False
+                    for i in range(await login_btns.count()):
+                        btn = login_btns.nth(i)
+                        if await btn.is_visible():
+                            await btn.click()
+                            clicked = True
+                            logger.info(f"Clicked visible Login button {i}")
+                            break
+                    if clicked:
+                        await asyncio.sleep(5)
+                        url = page.url
+                        logger.info(f"After Login click: {url[:80]}")
+                    else:
+                        logger.warning("No visible Login button found, trying direct auth.gmx.net")
+                        await page.goto("https://auth.gmx.net/login", wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                        url = page.url
+                        logger.info(f"After direct auth.gmx.net: {url[:80]}")
+                except Exception as e:
+                    logger.warning(f"Login link click failed: {e}")
+                    await page.goto("https://auth.gmx.net/login", wait_until="domcontentloaded")
+                    await asyncio.sleep(3)
+                    url = page.url
+                    logger.info(f"After direct auth.gmx.net: {url[:80]}")
             
             # On auth.gmx.net login page — step 1: fill email, click Weiter
             if "auth.gmx.net" in url or "login.gmx.net" in url:
@@ -609,7 +680,6 @@ class GmxService:
                 if await login_btn.is_visible(timeout=3000):
                     await login_btn.click()
                     logger.info("Clicked Login")
-                    await self._gmx_poll_for_url_contains(page, "auth.gmx.net", timeout=8, interval=0.3)
                 else:
                     btns = await page.query_selector_all('button')
                     for b in btns:
@@ -617,20 +687,41 @@ class GmxService:
                         if 'Login' == t:
                             await b.click()
                             logger.info("Clicked Login button")
-                            await self._gmx_poll_for_url_contains(page, "auth.gmx.net", timeout=8, interval=0.3)
                             break
+                
+                # Wait for redirect AWAY from auth.gmx.net (login success or error)
+                logger.info("Waiting for redirect after Login click...")
+                for _ in range(30):  # up to 15s
+                    await asyncio.sleep(0.5)
+                    url = page.url
+                    if "auth.gmx.net" not in url and "login.gmx.net" not in url:
+                        logger.info(f"Redirected to: {url[:80]}")
+                        break
+                    # Check for error message on page
+                    try:
+                        error_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+                        if "Falsche" in error_text or "falsch" in error_text or " Fehler" in error_text:
+                            logger.error(f"Login error on page: {error_text[:200]}")
+                            return False
+                    except Exception:
+                        pass
                 
                 # Check result
                 url = page.url
                 logger.info(f"After login, URL: {url[:80]}")
-                if "navigator.gmx.net/mail?sid=" in url:
-                    logger.info("Login successful, got SID")
+                if "navigator.gmx.net/mail" in url:
+                    logger.info("Login successful — on mail page")
                     return True
                 if "navigator.gmx.net" in url:
-                    # Might be on bap, try extracting SID
+                    return True
+                if "authcode" in url:
+                    logger.info("Got authcode redirect — login successful")
+                    return True
+                if "appa.gmx.net/_auth" in url and "error" not in url:
+                    logger.info("Auth callback received — login successful")
                     return True
                 
-                logger.error("Login failed — unexpected URL after login")
+                logger.error(f"Login failed — unexpected URL after login: {url[:120]}")
                 return False
             
             # Fallback: click Login button on homepage, then two-step auth
@@ -928,7 +1019,10 @@ class GmxService:
             own_email = ''
 
         # Also exclude known main GMX accounts that should NEVER be deleted
-        MAIN_EMAILS = {own_email, 'mara.miro@gmx.de', 'jerosin@gmx.net', 'opensin@gmx.de', 'nemotronv3@gmx.de'}
+        from agent_toolbox.core.config_manager import get_config
+        cfg = get_config()
+        own_email = cfg.gmx_email if cfg and cfg.gmx_email else ''
+        MAIN_EMAILS = {own_email, 'mara.miro@gmx.de', 'jerosin@gmx.net', 'opensin@gmx.de', 'nemotronv3@gmx.de', 'haro.bari@gmx.de'}
 
         logger.info("[_find_alias_row] Searching for alias")
         try:
@@ -952,7 +1046,7 @@ class GmxService:
         return None
 
     async def _delete_alias(self, page: Page, alias_email: str) -> bool:
-        """Delete an alias via CDP Input.dispatchMouseEvent (Wicket-kompatibel)."""
+        """Delete an alias using Playwright native hover + click for CSS :hover state."""
         logger.info(f"[_delete_alias] Deleting {alias_email}")
         try:
             frame = await self._get_all_email_frame(page)
@@ -960,95 +1054,144 @@ class GmxService:
                 logger.warning("allEmailAddresses iframe not found for delete")
                 return False
 
-            # 1) TABLE-ROW finden die den Alias enthält
-            row_data = await frame.evaluate(f"""() => {{
+            # 1) Find the row element containing the alias
+            row_idx = await frame.evaluate(f"""() => {{
                 var rows = document.querySelectorAll('tr, li, .row, [class*="row"]');
                 for (var i=0; i<rows.length; i++) {{
                     if (rows[i].textContent.includes('{alias_email}')) {{
                         var r = rows[i].getBoundingClientRect();
                         if (r.width > 20 && r.height > 5) {{
-                            // Mitte der Zeile (für Hover)
-                            return {{
-                                cx: Math.round(r.x + r.width/2),
-                                cy: Math.round(r.y + r.height/2)
+                            return i;
+                        }}
+                    }}
+                }}
+                return -1;
+            }}""")
+            if row_idx < 0:
+                logger.warning(f"Alias row not found: {alias_email}")
+                return False
+
+            # 2) Get the row's bounding box for Playwright native hover
+            row_box = await frame.evaluate(f"""() => {{
+                var rows = document.querySelectorAll('tr, li, .row, [class*="row"]');
+                var row = rows[{row_idx}];
+                if (!row) return null;
+                var r = row.getBoundingClientRect();
+                return {{x: r.x, y: r.y, w: r.width, h: r.height, cx: r.x + r.width/2, cy: r.y + r.height/2}};
+            }}""")
+            if not row_box:
+                logger.warning("Could not get row bounding box")
+                return False
+
+            # 3) RESTORE FOCUS — after navigation, page loses focus and hover() fails
+            #    (Playwright issue #37476). Click body first to restore focus.
+            logger.info("Restoring page focus before hover...")
+            try:
+                await page.mouse.click(10, 10)
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+            # 4) Use Playwright locator.hover() — triggers CSS :hover properly
+            #    Must use frame-scoped locator to hover within the correct frame context
+            try:
+                row_locator = frame.locator(f'tr:has-text("{alias_email}")').first
+                await row_locator.hover(timeout=5000)
+                await asyncio.sleep(2)
+                logger.info("Playwright locator.hover() succeeded")
+            except Exception as e:
+                logger.info(f"locator.hover() failed: {e}, falling back to mouse.move()")
+                # Fallback: Playwright native mouse.move()
+                await page.mouse.move(row_box['cx'], row_box['cy'])
+                await asyncio.sleep(2)
+
+            # 5) Force-unhide all hidden template elements (GMX uses .is-hidden)
+            await frame.evaluate("""() => {
+                var hidden = document.querySelectorAll('.is-hidden, [style*="display: none"], [style*="visibility: hidden"]');
+                for (var i = 0; i < hidden.length; i++) {
+                    hidden[i].style.display = '';
+                    hidden[i].style.visibility = 'visible';
+                    hidden[i].classList.remove('is-hidden');
+                }
+            }""")
+            await asyncio.sleep(0.5)
+
+            # 6) Find delete icon NEAR the hovered row (tight ±25px Y-range)
+            row_cy = row_box['cy']
+            delete_pos = await frame.evaluate(f"""() => {{
+                var delLinks = document.querySelectorAll('a.table-hover_icon[title*="löschen"], a.table-hover_icon[title*="Löschen"]');
+                var best = null;
+                var bestDist = 999;
+                for (var i = 0; i < delLinks.length; i++) {{
+                    var el = delLinks[i];
+                    var r = el.getBoundingClientRect();
+                    if (r.width > 3 && r.height > 3) {{
+                        var iconCy = r.y + r.height/2;
+                        var dist = Math.abs(iconCy - {row_cy});
+                        if (dist < 25 && dist < bestDist) {{
+                            bestDist = dist;
+                            best = {{
+                                x: Math.round(r.x + r.width/2),
+                                y: Math.round(r.y + r.height/2),
+                                title: el.getAttribute('title') || '',
+                                dist: Math.round(dist)
                             }};
                         }}
                     }}
                 }}
-                return null;
+                return best;
             }}""")
-            if not row_data:
-                logger.warning(f"Alias row not found: {alias_email}")
-                return False
 
-            # 2) CDP-Session für native Mouse-Events
-            cdp = await page.context.new_cdp_session(page)
-
-            # 3) Hover über die ZEILE (nicht über ein Text-Element)
-            logger.info(f"Hover row via CDP at ({row_data['cx']}, {row_data['cy']})")
-            await cdp.send('Input.dispatchMouseEvent', {
-                'type': 'mouseMoved', 'x': row_data['cx'], 'y': row_data['cy']
-            })
-            await asyncio.sleep(1.5)
-
-            # 4) Delete-Icon suchen — GMX-Struktur: Hover-Menu ist SIBLING der Row,
-            #    nicht IN der Row! Selektor: a.table-hover_icon[title*="löschen"]
-            #    Hidden in <div class="js-template is-hidden"> bis Row gehovert wird.
-            delete_pos = await frame.evaluate("""() => {
-                // Spezifischer Selektor: nur .table-hover_icon links mit "löschen" im title
-                var delLinks = document.querySelectorAll('a.table-hover_icon[title*="löschen"], a.table-hover_icon[title*="Löschen"]');
-                for (var i = 0; i < delLinks.length; i++) {
-                    var el = delLinks[i];
-                    var r = el.getBoundingClientRect();
-                    // Muss sichtbar sein (Hover hat Template unhidden gemacht)
-                    if (r.width > 5 && r.height > 5) {
-                        return {
+            if not delete_pos:
+                logger.warning("Delete icon not found near row — listing ALL visible elements")
+                all_icons = await frame.evaluate("""() => {
+                    var res = [];
+                    var delLinks = document.querySelectorAll('a[title*="löschen"], a[title*="Löschen"], a[title*="Lös"], a[title*="lös"]');
+                    for (var i = 0; i < delLinks.length; i++) {
+                        var el = delLinks[i];
+                        var r = el.getBoundingClientRect();
+                        res.push({
+                            title: (el.getAttribute('title') || '').substring(0, 50),
                             x: Math.round(r.x + r.width/2),
                             y: Math.round(r.y + r.height/2),
-                            title: el.getAttribute('title') || ''
-                        };
+                            w: Math.round(r.width), h: Math.round(r.height),
+                            visible: r.width > 3 && r.height > 3
+                        });
                     }
-                }
-                return null;
-            }""")
-            if not delete_pos:
-                logger.warning("Delete icon not found via .table-hover_icon selector — retrying with broader search")
-                # Fallback: alle sichtbaren Delete-Links (z.B. wenn class-Name sich ändert)
-                delete_pos = await frame.evaluate("""() => {
-                    var allLinks = document.querySelectorAll('a');
-                    for (var i = 0; i < allLinks.length; i++) {
-                        var el = allLinks[i];
-                        var title = (el.getAttribute('title') || '').toLowerCase();
-                        var aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                        if (title.indexOf('lösch') !== -1 || aria.indexOf('lösch') !== -1) {
-                            var r = el.getBoundingClientRect();
-                            if (r.width > 5 && r.height > 5) {
-                                return {
-                                    x: Math.round(r.x + r.width/2),
-                                    y: Math.round(r.y + r.height/2),
-                                    title: el.getAttribute('title') || ''
-                                };
-                            }
-                        }
-                    }
-                    return null;
+                    return res;
                 }""")
-                if not delete_pos:
-                    logger.warning("Delete icon not found globally either")
-                    return False
+                for icon in (all_icons or []):
+                    logger.info(f"  Delete icon: title={icon['title']} at ({icon['x']},{icon['y']}) {icon['w']}x{icon['h']} vis={icon['visible']}")
 
-            logger.info(f"Delete '{delete_pos.get('title', '')}' at ({delete_pos['x']}, {delete_pos['y']})")
+                # List all visible elements near the row
+                debug_els = await frame.evaluate(f"""() => {{
+                    var res = [];
+                    var allEls = document.querySelectorAll('a, button, span, div');
+                    for (var i = 0; i < allEls.length; i++) {{
+                        var el = allEls[i];
+                        var r = el.getBoundingClientRect();
+                        if (r.width > 3 && r.height > 3 && r.y > {row_cy - 60} && r.y < {row_cy + 60}) {{
+                            res.push({{
+                                tag: el.tagName,
+                                cls: (el.className || '').substring(0, 50),
+                                title: (el.getAttribute('title') || '').substring(0, 50),
+                                txt: (el.textContent || '').trim().substring(0, 30),
+                                x: Math.round(r.x), y: Math.round(r.y),
+                                w: Math.round(r.width), h: Math.round(r.height)
+                            }});
+                        }}
+                    }}
+                    return res;
+                }}""")
+                for el in (debug_els or []):
+                    logger.info(f"  Near-row: {el['tag']} cls={el['cls'][:30]} title={el['title']} txt={el['txt'][:20]} at ({el['x']},{el['y']}) {el['w']}x{el['h']}")
+                return False
 
-            # 5) Delete per CDP klicken
-            await cdp.send('Input.dispatchMouseEvent', {
-                'type': 'mousePressed', 'x': delete_pos['x'], 'y': delete_pos['y'],
-                'button': 'left', 'clickCount': 1
-            })
-            await asyncio.sleep(0.05)
-            await cdp.send('Input.dispatchMouseEvent', {
-                'type': 'mouseReleased', 'x': delete_pos['x'], 'y': delete_pos['y'],
-                'button': 'left', 'clickCount': 1
-            })
+            logger.info(f"Delete '{delete_pos['title']}' at ({delete_pos['x']}, {delete_pos['y']}) dist={delete_pos.get('dist', '?')}px from row")
+
+            # 5) Delete klicken via Playwright native mouse.click()
+            logger.info(f"Clicking delete icon at ({delete_pos['x']}, {delete_pos['y']})")
+            await page.mouse.click(delete_pos['x'], delete_pos['y'])
             await asyncio.sleep(3)
 
             # DEBUG: Screenshot after delete click
@@ -1060,74 +1203,101 @@ class GmxService:
             except Exception as ss_err:
                 logger.warning(f"Screenshot failed: {ss_err}")
 
-            # 6) Confirm-Dialog — search in BOTH iframe AND parent page
-            # GMX modal may be outside the allEmailAddresses iframe
+            # 6) Confirm-Dialog — search ALL Playwright frames
+            # Wicket modal renders at z=100 in a parent frame, NOT inside the
+            # allEmailAddresses iframe. page.evaluate() only searches the main
+            # frame context. We must iterate page.frames to reach all DOM scopes.
             confirm_found = False
-            for confirm_text in ['OK', 'Ok', 'Ja', 'Bestätigen', 'Löschen', 'Confirm', 'Yes']:
-                # First try iframe
-                ok_pos = await frame.evaluate(f"""() => {{
-                    var allEls = document.querySelectorAll('button, a, span, input[type="submit"], input[type="button"]');
-                    for (var i=0; i<allEls.length; i++) {{
-                        var el = allEls[i];
-                        var txt = (el.textContent || '').trim();
-                        var val = (el.value || '').trim();
-                        if (txt === '{confirm_text}' || val === '{confirm_text}') {{
-                            var r = el.getBoundingClientRect();
-                            if (r.width > 5 && r.height > 5) {{
-                                return {{x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2), src: 'iframe'}};
-                            }}
+
+            # JS search function (reused per frame)
+            _CONFIRM_JS = lambda ct: f"""() => {{
+                var allEls = document.querySelectorAll('button, a, span, input[type="submit"], input[type="button"]');
+                for (var i=0; i<allEls.length; i++) {{
+                    var el = allEls[i];
+                    var txt = (el.textContent || '').trim();
+                    var val = (el.value || '').trim();
+                    if (txt === '{ct}' || val === '{ct}') {{
+                        var r = el.getBoundingClientRect();
+                        var cs = window.getComputedStyle ? getComputedStyle(el) : null;
+                        var z = cs ? parseInt(cs.zIndex) || 0 : 0;
+                        if (r.width > 5 && r.height > 5) {{
+                            return {{x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2), z: z}};
                         }}
                     }}
-                    return null;
-                }}""")
-                # If not in iframe, try parent page
-                if not ok_pos:
-                    ok_pos = await page.evaluate(f"""() => {{
-                        var allEls = document.querySelectorAll('button, a, span, input[type="submit"], input[type="button"]');
-                        for (var i=0; i<allEls.length; i++) {{
-                            var el = allEls[i];
-                            var txt = (el.textContent || '').trim();
-                            var val = (el.value || '').trim();
-                            if (txt === '{confirm_text}' || val === '{confirm_text}') {{
-                                var r = el.getBoundingClientRect();
-                                if (r.width > 5 && r.height > 5) {{
-                                    return {{x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2), src: 'parent'}};
-                                }}
-                            }}
-                        }}
-                        return null;
-                    }}""")
-                if ok_pos:
-                    logger.info(f"Confirm '{confirm_text}' at ({ok_pos['x']}, {ok_pos['y']}) src={ok_pos.get('src', '?')}")
-                    await cdp.send('Input.dispatchMouseEvent', {
-                        'type': 'mousePressed', 'x': ok_pos['x'], 'y': ok_pos['y'],
-                        'button': 'left', 'clickCount': 1
-                    })
-                    await asyncio.sleep(0.05)
-                    await cdp.send('Input.dispatchMouseEvent', {
-                        'type': 'mouseReleased', 'x': ok_pos['x'], 'y': ok_pos['y'],
-                        'button': 'left', 'clickCount': 1
-                    })
-                    await asyncio.sleep(2)
-                    confirm_found = True
+                }}
+                return null;
+            }}"""
+
+            for confirm_text in ['Löschen', 'Bestätigen', 'Ja', 'OK', 'Ok', 'Confirm', 'Yes', 'Abbrechen', 'Cancel', 'E-Mail-Adresse löschen', 'E-Mail löschen']:
+                # Search ALL frames (Wicket modal may be in any parent frame)
+                for idx, f in enumerate(page.frames):
+                    try:
+                        ok_pos = await f.evaluate(_CONFIRM_JS(confirm_text))
+                    except Exception:
+                        continue
+                    if ok_pos:
+                        logger.info(f"Confirm '{confirm_text}' at ({ok_pos['x']}, {ok_pos['y']}) z={ok_pos.get('z', '?')} frame={idx}")
+                        await page.mouse.click(ok_pos['x'], ok_pos['y'])
+                        await asyncio.sleep(2)
+                        confirm_found = True
+                        break
+                if confirm_found:
                     break
+
             if not confirm_found:
-                # Last resort: JS click on any visible OK-like button in parent page
-                clicked = await page.evaluate("""() => {
-                    var btns = document.querySelectorAll('button');
-                    for (var i = 0; i < btns.length; i++) {
-                        var txt = (btns[i].textContent || '').trim().toUpperCase();
-                        if (txt === 'OK' || txt === 'BESTÄTIGEN' || txt === 'LÖSCHEN') {
-                            btns[i].click();
-                            return true;
-                        }
-                    }
-                    return false;
-                }""")
-                if clicked:
-                    logger.info("Confirm clicked via JS fallback on parent page")
-                    await asyncio.sleep(2)
-                else:
+                # Last resort: JS click on any visible OK-like button across all frames
+                for f in page.frames:
+                    try:
+                        clicked = await f.evaluate("""() => {
+                            var btns = document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]');
+                            for (var i = 0; i < btns.length; i++) {
+                                var txt = (btns[i].textContent || btns[i].value || '').trim().toUpperCase();
+                                if (txt === 'OK' || txt === 'BESTÄTIGEN' || txt === 'LÖSCHEN' || txt === 'JA' || txt === 'CONFIRM' || txt === 'YES' || txt === 'E-MAIL-ADRESSE LÖSCHEN' || txt === 'E-MAIL LÖSCHEN' || txt === 'ABBRECHEN' || txt === 'CANCEL') {
+                                    btns[i].click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }""")
+                        if clicked:
+                            logger.info("Confirm clicked via JS fallback")
+                            await asyncio.sleep(2)
+                            confirm_found = True
+                            break
+                    except Exception:
+                        continue
+                if not confirm_found:
+                    # Try searching for the confirm dialog by structure (Wicket modal)
+                    logger.info("Searching for confirm dialog by structure...")
+                    for f in page.frames:
+                        try:
+                            found = await f.evaluate("""() => {
+                                // Look for wicket modal / dialog structure
+                                var modals = document.querySelectorAll('.wicket-modal, .modal, .dialog, [role="dialog"], .ui-dialog, .confirm-dialog, .modal-dialog');
+                                for (var i = 0; i < modals.length; i++) {
+                                    var modal = modals[i];
+                                    var btns = modal.querySelectorAll('button, a, [role="button"], input[type="submit"]');
+                                    for (var j = 0; j < btns.length; j++) {
+                                        var txt = (btns[j].textContent || btns[j].value || '').trim().toUpperCase();
+                                        if (txt === 'OK' || txt === 'BESTÄTIGEN' || txt === 'LÖSCHEN' || txt === 'JA' || txt === 'CONFIRM' || txt === 'YES' || txt === 'E-MAIL-ADRESSE LÖSCHEN' || txt === 'E-MAIL LÖSCHEN') {
+                                            var r = btns[j].getBoundingClientRect();
+                                            if (r.width > 5 && r.height > 5) {
+                                                btns[j].click();
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                }
+                                return false;
+                            }""")
+                            if found:
+                                logger.info("Confirm found in modal structure")
+                                await asyncio.sleep(2)
+                                confirm_found = True
+                                break
+                        except Exception:
+                            continue
+                if not confirm_found:
                     logger.info("No confirm dialog found")
 
             # 7) Verifikation
@@ -1197,29 +1367,40 @@ class GmxService:
             logger.error(f"Error clicking add button: {e}")
             return False
 
-    async def _verify_alias(self, page: Page, alias_email: str, present: bool = True, max_wait: float = 20.0) -> bool:
+    async def _verify_alias(self, page: Page, alias_email: str, present: bool = True, max_wait: float = 30.0) -> bool:
         """Verify alias is present/absent — polls iframe content every 0.5s."""
         logger.info(f"[_verify_alias] Checking {alias_email} present={present}")
         try:
             deadline = time.time() + max_wait
+            attempt = 0
             while time.time() < deadline:
+                attempt += 1
                 frame = await self._get_all_email_frame(page)
                 if frame:
                     try:
-                        text = await frame.evaluate("() => document.body.innerText")
+                        text = await frame.evaluate("() => document.body ? document.body.innerText : ''")
                         found = alias_email in text
+                        if attempt <= 5 or attempt % 10 == 0:
+                            logger.info(f"[_verify_alias] attempt={attempt} text_len={len(text)} found={found}")
+                            if not found and attempt <= 5:
+                                # Log first 500 chars to debug
+                                logger.info(f"  Content preview: {text[:500]}")
                         if present and found:
                             return True
                         if not present and not found:
                             return True
-                    except Exception:
+                    except Exception as e:
+                        if attempt <= 5:
+                            logger.info(f"[_verify_alias] frame eval error: {e}")
                         pass  # Frame might be reloading
                 else:
                     for f in page.frames:
                         if "allEmailAddresses" in f.url and "settings" in f.url:
                             try:
-                                text = await f.evaluate("() => document.body.innerText")
+                                text = await f.evaluate("() => document.body ? document.body.innerText : ''")
                                 found = alias_email in text
+                                if attempt <= 5:
+                                    logger.info(f"[_verify_alias] fallback frame attempt={attempt} text_len={len(text)} found={found}")
                                 if present and found:
                                     return True
                                 if not present and not found:
@@ -1227,7 +1408,7 @@ class GmxService:
                             except Exception:
                                 pass
                             break
-                await asyncio.sleep(0.5)  # Faster poll: was 1s, now 0.5s
+                await asyncio.sleep(0.5)
             logger.warning(f"Verify timeout after {max_wait}s: {alias_email} present={present}")
             return False
         except Exception as e:
@@ -1254,6 +1435,16 @@ class GmxService:
                 if not await self._click_add_button(page):
                     return {"status": "error", "alias_email": None, "error": "Hinzufügen-Button nicht gefunden"}
                 await asyncio.sleep(3)
+                
+                # Force page reload to see the new alias
+                logger.info("Reloading alias page to verify creation")
+                await page.reload(wait_until="domcontentloaded")
+                await asyncio.sleep(3)
+                
+                # Re-navigate to ensure we're on the correct page
+                if not await self._navigate_to_all_email_addresses(page):
+                    logger.warning("Failed to reload alias page after creation")
+                await asyncio.sleep(2)
 
                 if await self._verify_alias(page, alias_email, present=True):
                     return {"status": "success", "alias_email": alias_email}
@@ -1703,12 +1894,12 @@ class GmxService:
         return injected
 
     async def read_otp_main_frame_only(self, sender_keyword: str = "fireworks", timeout: int = 120) -> Dict[str, Any]:
-        """OTP-Suche mit Shadow DOM Traversal (nur main + mail frame)."""
+        """OTP-Suche in webmailer.gmx.net mail frame (no Shadow DOM traversal needed)."""
         if self.inbox_tab is None:
             logger.error("inbox_tab nicht initialisiert")
             return {"status": "error", "otp_url": None, "error": "inbox_tab missing"}
 
-        logger.info(f"[Main-Frame-OTP] Start (Keyword: {sender_keyword}, timeout: {timeout}s)")
+        logger.info(f"[Main-Frame-OTP] Start (Keyword: {sender_keyword}, timeout: {timeout}s, URL: {self.inbox_tab.url[:60]})")
 
         pattern_url = re.compile(
             r"https://app\.fireworks\.ai/(?:signup/(?:confirm|verify)|confirm|verify|accounts/confirm)\S+"
@@ -1743,9 +1934,8 @@ class GmxService:
             try:
                 frames_to_scan = [self.inbox_tab.main_frame]
                 for f in self.inbox_tab.frames:
-                    if f.name == "mail":
+                    if f.name == "mail" or f.name == "id99" or "3c.gmx.net" in f.url or "webmailer.gmx.net" in f.url:
                         frames_to_scan.append(f)
-                        break
 
                 logger.debug(f"[Main-Frame-OTP] Frame check: main={self.inbox_tab.main_frame.url[:60] if self.inbox_tab.main_frame else 'None'}")
                 for f in self.inbox_tab.frames:

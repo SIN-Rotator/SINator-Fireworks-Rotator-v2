@@ -112,11 +112,34 @@ async def _poll_for(condition_fn, timeout: float = 10.0, interval: float = 0.3, 
     return False
 
 
+async def _eval(expression: str, default="0"):
+    """Safe wrapper around browser_console — always returns a string result.
+    
+    browser_console returns {"error": ...} when page.evaluate() fails
+    (e.g. during page navigation). This wrapper returns `default` instead.
+    """
+    from sin_browser_tools.tools.extraction import browser_console
+    r = await browser_console(expression)
+    if "result" in r:
+        return r["result"]
+    if "error" in r:
+        logger.debug(f"_eval error: {r['error']}")
+    return default
+
+
+async def _eval_int(expression: str, default=0) -> int:
+    """Safe wrapper — returns int result or default."""
+    try:
+        return int(await _eval(expression, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
 async def _poll_for_element(selector: str, timeout: float = 10.0, interval: float = 0.3) -> bool:
     """Poll until a DOM element matching selector exists."""
     from sin_browser_tools.tools.extraction import browser_console
     async def check():
-        count = int((await browser_console(f"document.querySelectorAll('{selector}').length"))["result"])
+        count = int((await _eval(f"document.querySelectorAll('{selector}').length")))
         return count > 0
     return await _poll_for(check, timeout, interval, f"element: {selector}")
 
@@ -268,32 +291,72 @@ async def _dismiss_cookie_consent() -> None:
     The init_script in launch() sets localStorage consent + CSS hiding + MutationObserver
     to PREVENT the banner. This function is the reactive fallback that removes any
     banner that slipped through (e.g. if CookieYes ignores localStorage).
+    
+    Uses Playwright page directly for reliable button clicking across iframes.
     """
-    from sin_browser_tools.tools.interaction import browser_click_by_text
-    from sin_browser_tools.tools.extraction import browser_console
-
-    # 1. Try clicking "Reject All" (cleanest — sets CookieYes consent properly)
     try:
-        await browser_click_by_text("Reject All", role="button")
-        await asyncio.sleep(0.5)
-        logger.info("Cookie banner: 'Reject All' clicked")
+        from sin_browser_tools.core import manager as _mgr
+        _page = _mgr._require().page
     except Exception:
-        pass
+        return
 
-    # 2. Nuke all known consent DOM elements via JS
-    await browser_console("""(() => {
-        // CookieYes (cky-*)
-        document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
-        // OneTrust
-        document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
-        // Generic consent containers
-        document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
-        // Iframe-based banners
-        document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
-        // Restore scroll
-        document.body.style.overflow = 'visible';
-        document.documentElement.style.overflow = 'visible';
-    })()""")
+    # 1. Try clicking consent buttons directly via Playwright (finds buttons in iframes too)
+    for text in ["Accept All", "Reject All", "Accept", "OK", "Got it", "Allow all"]:
+        try:
+            # Try main frame first
+            btn = _page.get_by_role("button", name=text)
+            if await btn.count() > 0 and await btn.first.is_visible(timeout=2000):
+                await btn.first.click()
+                logger.info(f"Cookie banner: '{text}' clicked (main frame)")
+                await asyncio.sleep(0.5)
+                return
+        except Exception:
+            pass
+        try:
+            # Try all frames
+            for frame in _page.frames:
+                try:
+                    btn = frame.get_by_role("button", name=text)
+                    if await btn.count() > 0 and await btn.first.is_visible(timeout=1000):
+                        await btn.first.click()
+                        logger.info(f"Cookie banner: '{text}' clicked (frame: {frame.url[:40]})")
+                        await asyncio.sleep(0.5)
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    # 2. Nuke all known consent DOM elements via Playwright evaluate (more reliable than console)
+    try:
+        await _page.evaluate("""() => {
+            // CookieYes (cky-*)
+            document.querySelectorAll('.cky-overlay,.cky-consent-container,.cky-banner-container,.cky-modal,.cky-preference-center,.cky-notice,[class*="cky-"]').forEach(e => e.remove());
+            // OneTrust
+            document.querySelectorAll('#onetrust-banner-sdk,#onetrust-pc-sdk,#onetrust-consent-sdk,[class*="onetrust"],[id*="onetrust"]').forEach(e => e.remove());
+            // Generic consent containers
+            document.querySelectorAll('[class*="consent-banner"],[id*="consent-banner"],[class*="cookie-banner"],[id*="cookie-banner"],[data-testid*="consent"]').forEach(e => e.remove());
+            // Iframe-based banners
+            document.querySelectorAll('iframe[src*="cky"],iframe[src*="consent"],iframe[src*="cookie"]').forEach(e => e.remove());
+            // Modals and overlays with high z-index (consent dialogs)
+            document.querySelectorAll('[role="dialog"],[role="alertdialog"],.modal,.overlay').forEach(e => {
+                var z = parseInt(window.getComputedStyle(e).zIndex || '0');
+                if (z > 100) e.remove();
+            });
+            // Fixed position overlays covering viewport (consent banners)
+            document.querySelectorAll('div').forEach(e => {
+                var s = window.getComputedStyle(e);
+                if (s.position === 'fixed' && (s.zIndex > 9000 || e.className.match(/consent|cookie|banner|overlay|modal/i))) {
+                    e.remove();
+                }
+            });
+            // Restore scroll
+            document.body.style.overflow = 'visible';
+            document.documentElement.style.overflow = 'visible';
+            document.body.style.position = 'static';
+        }""")
+    except Exception as e:
+        logger.warning(f"Consent DOM removal failed: {e}")
     await asyncio.sleep(0.3)
 
 
@@ -323,6 +386,21 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
 
     # Dismiss cookie consent banner (preventive init_script + reactive fallback)
     await _dismiss_cookie_consent()
+    await asyncio.sleep(1.0)
+
+    # Wait for email input to appear
+    email_found = await _poll_for_element('input[name="email"]', timeout=10, interval=0.3)
+    if not email_found:
+        # Maybe the signup page redirected to homepage — try direct URL
+        logger.info("Email input not found, retrying with ?useEmail=true")
+        await browser_navigate("https://app.fireworks.ai/signup?useEmail=true")
+        await _dismiss_cookie_consent()
+        await asyncio.sleep(1.0)
+        email_found = await _poll_for_element('input[name="email"]', timeout=10, interval=0.3)
+    if not email_found:
+        body = (await browser_get_text("body")).get("text", "")
+        logger.error(f"Email input not found after retries. Page text: {body[:300]}")
+        return {"status": "error", "error": "email_input_not_found", "steps_completed": steps}
 
     r = await browser_fill('input[name="email"]', email)
     if r.get("status") != "typed":
@@ -336,9 +414,38 @@ async def signup_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any
     await browser_press("Enter")
     logger.info("Email submitted via Enter key")
 
+    # Dismiss consent again — banner often reappears after SPA navigation
+    await _dismiss_cookie_consent()
+
+    # Log URL after email submit for debugging
+    url_after = (await browser_get_url())["url"]
+    logger.info(f"URL after email submit: {url_after}")
+
+    # Check if email was filled on landing page hero input (URL becomes signup?email=...)
+    # If so, the email input matched the wrong element. Navigate to signup with useEmail.
+    if '?email=' in url_after:
+        logger.warning("Landing page email input matched — retrying with signup form")
+        await browser_navigate("https://app.fireworks.ai/signup?useEmail=true")
+        await _dismiss_cookie_consent()
+        await asyncio.sleep(1.0)
+        email_found2 = await _poll_for_element('input[name="email"]', timeout=10, interval=0.3)
+        if not email_found2:
+            body = (await browser_get_text("body")).get("text", "")
+            logger.error(f"Email input not found on retry. Page text: {body[:300]}")
+            return {"status": "error", "error": "email_input_not_found", "steps_completed": steps}
+        r2 = await browser_fill('input[name="email"]', email)
+        if r2.get("status") != "typed":
+            logger.error("Email fill failed on retry")
+            return {"status": "error", "error": "email_fill_failed", "steps_completed": steps}
+        await asyncio.sleep(0.3)
+        await browser_press("Enter")
+        logger.info("Email submitted via Enter key (retry)")
+        url_after = (await browser_get_url())["url"]
+        logger.info(f"URL after email submit (retry): {url_after}")
+
     for _ in range(12):
         await asyncio.sleep(0.5)
-        pw_count = int((await browser_console("document.querySelectorAll('input[type=password]').length"))["result"])
+        pw_count = await _eval_int("document.querySelectorAll('input[type=password]').length")
         if pw_count >= 2:
             break
         body = (await browser_get_text("body")).get("text", "")
@@ -483,7 +590,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
         except Exception:
             pass
         await asyncio.sleep(1)
-        email_count = int((await browser_console("document.querySelectorAll('input[name=email]').length"))["result"])
+        email_count = await _eval_int("document.querySelectorAll('input[name=email]').length")
         if email_count > 0:
             break
     steps.append("login_page")
@@ -497,7 +604,7 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     # Poll for password field to appear (replaces fixed sleep)
     await _poll_for_element('input[type="password"]', timeout=8, interval=0.2)
 
-    pw_count = int((await browser_console("document.querySelectorAll('input[type=password]').length"))["result"])
+    pw_count = await _eval_int("document.querySelectorAll('input[type=password]').length")
     if pw_count > 0:
         await browser_fill('input[type="password"]', password)
         steps.append("password_filled")
@@ -511,9 +618,10 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
     await _poll_for_url_change(old_url, timeout=10, interval=0.3)
     steps.append("form_submitted")
 
-    for _ in range(15):
+    for i in range(30):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
+        logger.debug(f"Login poll {i+1}/30: {url[:80]}")
         if 'login' not in url.lower():
             if 'onboarding' in url:
                 logger.info("Onboarding detected, running workflow")
@@ -525,9 +633,10 @@ async def login_fireworks(email: str, password: str, **kwargs) -> Dict[str, Any]
                 steps.append("login_success")
                 return {"status": "success", "steps_completed": steps}
 
-    for _ in range(15):
+    for i in range(30):
         await asyncio.sleep(1)
         url = (await browser_get_url())["url"]
+        logger.debug(f"Login final poll {i+1}/30: {url[:80]}")
         if 'login' not in url.lower() and 'onboarding' not in url.lower():
             if any(x in url for x in ['home', 'account', 'settings', 'api-keys', 'models']):
                 logger.info(f"Final redirect: {url[:60]}")
@@ -623,7 +732,7 @@ async def _playwright_onboarding() -> None:
 
     # Account ID — DO NOT TOUCH (Fireworks pre-fills it with a unique suggestion,
     # editing it triggers a "max 20 chars" validation error)
-    has_aid = int((await browser_console("document.querySelectorAll('input[name=accountId]').length"))["result"])
+    has_aid = await _eval_int("document.querySelectorAll('input[name=accountId]').length")
     if has_aid > 0:
         # Just verify the pre-filled value is there; DO NOT overwrite
         current_aid = await browser_console("""(() => {
@@ -647,7 +756,7 @@ async def _playwright_onboarding() -> None:
     fn_filled = False
     for selector in ['input[name="firstName"]', 'input[name="first"]', 'input[placeholder*="First"]', 'input[placeholder*="first"]']:
         try:
-            count = int((await browser_console(f"document.querySelectorAll('{selector}').length"))["result"])
+            count = await _eval_int(f"document.querySelectorAll('{selector}').length")
             if count > 0:
                 await browser_type(selector, "Super")
                 fn_filled = True
@@ -678,7 +787,7 @@ async def _playwright_onboarding() -> None:
     ln_filled = False
     for selector in ['input[name="lastName"]', 'input[name="last"]', 'input[placeholder*="Last"]', 'input[placeholder*="last"]']:
         try:
-            count = int((await browser_console(f"document.querySelectorAll('{selector}').length"))["result"])
+            count = await _eval_int(f"document.querySelectorAll('{selector}').length")
             if count > 0:
                 await browser_type(selector, "Cheetah")
                 ln_filled = True
@@ -1448,12 +1557,51 @@ async def create_api_key(key_name: str = "sinator-key", **kwargs) -> Dict[str, A
     logger.info(f"API Keys page loaded: {url[:80]}")
 
     await _dismiss_cookie_consent()
+    await asyncio.sleep(2)
+
+    # DIAG: screenshot + dump all buttons before clicking
+    try:
+        from sin_browser_tools.core import manager as _mgr
+        _p = _mgr._require().page
+        await _p.screenshot(path="/tmp/fw_api_keys_pre_click.png")
+        _btns = await _p.query_selector_all("button, [role=button], a[class*=btn], a[class*=Button]")
+        for _i, _b in enumerate(_btns[:30]):
+            try:
+                _t = (await _b.inner_text()).strip()
+                _vis = await _b.is_visible()
+                if _t and len(_t) < 80:
+                    logger.info(f"  DIAG btn[{_i}] vis={_vis} text=\"{_t}\"")
+            except Exception:
+                pass
+        _body_text = await _p.inner_text("body")
+        logger.info(f"DIAG page text (first 400): {_body_text[:400]}")
+    except Exception as _e:
+        logger.warning(f"DIAG screenshot failed: {_e}")
 
     for attempt_try in range(3):
-        try:
-            await browser_click_by_text("Create API Key", role="button")
-            # No fixed sleep — poll for dialog input below
-        except Exception:
+        # Try multiple button text variants
+        clicked = False
+        for btn_text in ["Create API key", "Create API Key", "Create key", "Create"]:
+            try:
+                await browser_click_by_text(btn_text, role="button")
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            # Try without role constraint — any element with "Create" text
+            try:
+                from sin_browser_tools.core import manager as _mgr2
+                _p2 = _mgr2._require().page
+                _create_els = await _p2.query_selector_all("text=Create")
+                if _create_els:
+                    await _create_els[0].click()
+                    clicked = True
+                    logger.info("Clicked 'Create' element via query_selector fallback")
+            except Exception:
+                pass
+
+        if not clicked:
             if attempt_try < 2:
                 logger.warning("Create API Key button not found — retry")
                 try:
