@@ -198,14 +198,10 @@ async def main():
             logger.error("No alias created")
             return
 
-        # ══════════════════════════════════════════════════════════════
-        # Bot Chrome (Fireworks) — SIN-Browser-Tools
-        # Bleibt GEÖFFNET bis API Key generiert
-        # ══════════════════════════════════════════════════════════════
-        logger.info("=== Launching Bot Chrome via SIN-Browser-Tools ===")
-        from fireworks_service import launch, cleanup_bot, signup_fireworks
-        from fireworks_service import verify_account, create_api_key, login_fireworks
-        from fireworks_service import check_credits, add_billing
+        # Step 3.5: Connect to existing Fireworks browser for billing
+        logger.info("=== Billing via Existing Fireworks Browser ===")
+        # The fw_mgr already has the authenticated Fireworks browser 
+        # We'll use the existing page for billing instead of launching Chrome CDP
 
         launch_result = await launch()
         fw_mgr = launch_result.get("browser_manager")
