@@ -1703,29 +1703,24 @@ async def check_credits() -> Dict[str, Any]:
         return {"status": "error", "error": str(e), "credits": 0.0, "has_credits": False}
 
 
-# ── Billing (Payment Method via Chrome CDP) ──────────────────────────────────
+# ── Billing (Payment Method via Bot Chrome) ──────────────────────────────────
 
-async def add_billing(email: str, password: str, **kwargs) -> Dict[str, Any]:
-    """Add payment method to Fireworks account via Chrome CDP + Profile 159.
+async def add_billing(**kwargs) -> Dict[str, Any]:
+    """Add payment method to Fireworks account via the existing Bot Chrome session.
 
-    Uses real Chrome with Google account to avoid hCaptcha.
-    Falls back to hCaptcha wait (manual user intervention) if needed.
+    Uses the same Playwright browser that was used for signup/login (via
+    SIN-Browser-Tools manager). Navigates to /account/billing, fills card
+    details + address, clicks Save, then polls for hCaptcha (user must solve
+    manually).
 
-    Args:
-        email: Fireworks account email
-        password: Fireworks account password
+    Flow: /account/billing → Add payment → Stripe Checkout → fill card →
+          fill address → Save → poll hCaptcha (100×3s = 5 min) → verify
 
     Returns:
-        Dict with 'status' ('success'|'error'|'hcaptcha_pending') and details.
+        Dict with 'status' ('success'|'error'|'hcaptcha_timeout') and details.
     """
-    import subprocess
     import random
     import re
-
-    CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    PROFILE_SRC = os.path.expanduser("~/Library/Application Support/Google/Chrome/Profile 159")
-    PROFILE_DST = "/tmp/chrome-profile-159"
-    CDP_PORT = 9222
 
     # Random Berlin addresses
     STREETS = [
@@ -1739,306 +1734,253 @@ async def add_billing(email: str, password: str, **kwargs) -> Dict[str, Any]:
     LAST_NAMES = ["Mueller", "Schmidt", "Schneider", "Fischer", "Weber", "Wagner", "Becker", "Hoffmann"]
     CARD_NUMBERS = ["4349710048183244", "4242424242424242", "5555555555554444"]
 
-    # Step 1: Copy Chrome profile
-    logger.info("Billing: Copying Chrome profile...")
+    from sin_browser_tools.core import manager as _mgr
+
     try:
-        if os.path.exists(PROFILE_DST):
-            subprocess.run(["rm", "-rf", PROFILE_DST], check=True, timeout=10)
-        subprocess.run(["mkdir", "-p", PROFILE_DST], check=True, timeout=5)
-        subprocess.run(
-            ["cp", "-a", PROFILE_SRC, f"{PROFILE_DST}/Profile 159"],
-            check=True, timeout=30
-        )
-        # Copy Local State
-        local_state = os.path.expanduser("~/Library/Application Support/Google/Chrome/Local State")
-        if os.path.exists(local_state):
-            subprocess.run(["cp", local_state, f"{PROFILE_DST}/"], check=True, timeout=5)
-        logger.info("Chrome profile copied")
+        page = _mgr._require().page
     except Exception as e:
-        return {"status": "error", "error": f"Profile copy failed: {e}"}
+        return {"status": "error", "error": f"No active browser page: {e}"}
 
-    # Step 2: Launch Chrome with CDP
-    logger.info(f"Billing: Launching Chrome on CDP port {CDP_PORT}...")
-    chrome_proc = None
+    # ── Step 1: Navigate to billing ────────────────────────────────────────
+    logger.info("Billing: Navigating to /account/billing...")
     try:
-        chrome_proc = subprocess.Popen([
-            CHROME,
-            f"--user-data-dir={PROFILE_DST}",
-            "--profile-directory=Profile 159",
-            f"--remote-debugging-port={CDP_PORT}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-blink-features=AutomationControlled",
-            "about:blank"
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        await asyncio.sleep(3)
+        await page.goto("https://app.fireworks.ai/account/billing",
+                        wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        return {"status": "error", "error": f"Navigation failed: {e}"}
 
-        # Step 3: Connect via Playwright CDP
-        from playwright.async_api import async_playwright
-        pw = await async_playwright().start()
-        browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
-        ctx = browser.contexts[0]
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-
-        # Stealth patch
-        await page.evaluate("() => { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); }")
-
-        # Step 4: Login to Fireworks
-        logger.info("Billing: Logging in to Fireworks...")
-        await page.goto("https://app.fireworks.ai/login", wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(3)
-
-        # Dismiss cookie consent
-        try:
-            for text in ["Accept All", "Reject All"]:
-                btn = page.get_by_role("button", name=text)
-                if await btn.count() > 0 and await btn.first.is_visible(timeout=2000):
-                    await btn.first.click()
-                    await asyncio.sleep(0.5)
-                    break
-        except Exception:
-            pass
-
-        # Click "Email Login"
-        try:
-            email_link = page.get_by_role("link", name="Email Login")
-            if await email_link.count() > 0:
-                await email_link.first.click()
-                await asyncio.sleep(2)
-        except Exception:
-            pass
-
-        # Check if already logged in (skip login if so)
+    # Wait for page to settle
+    for _ in range(20):
+        await asyncio.sleep(1)
         url = page.url
+        if "billing" in url.lower():
+            break
         if "login" in url.lower():
-            # Fill email
-            email_input = page.locator("input[name='email']")
-            if await email_input.count() > 0:
-                await email_input.fill(email)
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(2)
+            return {"status": "error", "error": "Redirected to login — not authenticated"}
 
-            # Fill password
-            pw_input = page.locator("input[type='password'], input[name='password']")
-            if await pw_input.count() > 0:
-                await pw_input.first.fill(password)
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(5)
+    await asyncio.sleep(3)
 
-            # Wait for redirect
-            for _ in range(15):
-                url = page.url
-                if "login" not in url.lower():
-                    break
-                await asyncio.sleep(1)
+    # Dismiss cookie consent if present
+    try:
+        for text in ["Accept All", "Reject All"]:
+            btn = page.get_by_role("button", name=text)
+            if await btn.count() > 0 and await btn.first.is_visible(timeout=2000):
+                await btn.first.click()
+                await asyncio.sleep(0.5)
+                break
+    except Exception:
+        pass
 
-        logger.info(f"Billing: Current URL: {page.url[:60]}")
-
-        # Step 5: Navigate to billing
-        logger.info("Billing: Navigating to /account/billing...")
-        await page.goto("https://app.fireworks.ai/account/billing", wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(5)
-
-        # Dismiss consent again if needed
-        try:
-            for text in ["Accept All", "Reject All"]:
-                btn = page.get_by_role("button", name=text)
-                if await btn.count() > 0 and await btn.first.is_visible(timeout=2000):
-                    await btn.first.click()
-                    await asyncio.sleep(0.5)
-                    break
-        except Exception:
-            pass
-
-        # Check if already has payment method
-        body_text = await page.inner_text("body")
-        if "payment method" in body_text.lower() and "add" not in body_text.lower():
-            logger.info("Billing: Payment method already exists")
-            await browser.close()
-            await pw.stop()
+    # ── Step 2: Check if payment method already exists ─────────────────────
+    body_text = await page.inner_text("body")
+    if "payment method" in body_text.lower():
+        # Check if there's an "Add" button — if not, payment already exists
+        add_btn_check = page.locator("button:has-text('Add payment'), button:has-text('add payment')")
+        if await add_btn_check.count() == 0:
+            logger.info("Billing: Payment method already exists — skipping")
             return {"status": "success", "message": "Payment method already exists"}
 
-        # Step 6: Click "Add payment method"
-        logger.info("Billing: Clicking 'Add payment method'...")
-        add_btn = page.locator("button:has-text('Add payment method'), button:has-text('add payment method')")
-        if await add_btn.count() > 0:
-            await add_btn.first.click()
-        else:
-            # Try text match
-            try:
-                add_btn2 = page.get_by_role("button", name=re.compile(r"add payment", re.IGNORECASE))
-                if await add_btn2.count() > 0:
-                    await add_btn2.first.click()
-                else:
-                    logger.error("Billing: 'Add payment method' button not found")
-                    await browser.close()
-                    await pw.stop()
-                    return {"status": "error", "error": "Add payment button not found"}
-            except Exception as e:
-                logger.error(f"Billing: Button click failed: {e}")
-                await browser.close()
-                await pw.stop()
-                return {"status": "error", "error": str(e)}
+    # ── Step 3: Click "Add payment method" ─────────────────────────────────
+    logger.info("Billing: Clicking 'Add payment method'...")
+    add_btn = page.locator(
+        "button:has-text('Add payment method'), button:has-text('add payment method'), "
+        "button:has-text('Add Payment'), button:has-text('Add payment')"
+    )
+    if await add_btn.count() == 0:
+        # Try regex match
+        try:
+            add_btn = page.get_by_role("button", name=re.compile(r"add.?payment", re.IGNORECASE))
+        except Exception:
+            pass
 
-        # Wait for Stripe Checkout
-        logger.info("Billing: Waiting for Stripe Checkout...")
-        stripe_loaded = False
-        for _ in range(20):
+    if add_btn and (await add_btn.count() if hasattr(add_btn, 'count') else 0) > 0:
+        await add_btn.first.click()
+    else:
+        logger.error("Billing: 'Add payment method' button not found")
+        await page.screenshot(path="/tmp/billing_no_add_btn.png")
+        return {"status": "error", "error": "Add payment button not found"}
+
+    # ── Step 4: Wait for Stripe Checkout ────────────────────────────────────
+    logger.info("Billing: Waiting for Stripe Checkout...")
+    stripe_loaded = False
+    for _ in range(30):
+        await asyncio.sleep(1)
+        # Check for Stripe card fields (directly in DOM, not in iframes)
+        card_num = page.locator("input[name='cardNumber']")
+        if await card_num.count() > 0:
+            stripe_loaded = True
+            break
+        # Check for card accordion
+        accordion = page.locator("[data-testid='card-accordion-item-button']")
+        if await accordion.count() > 0:
+            stripe_loaded = True
+            break
+        # Check URL
+        url = page.url
+        if "stripe" in url.lower() or "checkout" in url.lower():
+            stripe_loaded = True
+            break
+
+    if not stripe_loaded:
+        logger.error("Billing: Stripe Checkout did not load after 30s")
+        await page.screenshot(path="/tmp/billing_stripe_fail.png")
+        return {"status": "error", "error": "Stripe Checkout not loaded"}
+
+    await asyncio.sleep(2)
+    logger.info("Billing: Stripe Checkout loaded")
+
+    # ── Step 5: Fill card details ──────────────────────────────────────────
+    card = random.choice(CARD_NUMBERS)
+    name = f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
+    street = random.choice(STREETS)
+    plz = random.choice(PLZ_LIST)
+
+    logger.info(f"Billing: Filling card {card[:4]}****{card[-4:]} as {name}")
+
+    # Expand card accordion if needed
+    try:
+        accordion = page.locator("[data-testid='card-accordion-item-button']")
+        if await accordion.count() > 0:
+            await accordion.first.click()
             await asyncio.sleep(1)
-            url = page.url
-            if "stripe" in url.lower() or "checkout" in url.lower():
-                stripe_loaded = True
-                break
-            # Also check for card accordion in current page
-            card_accordion = page.locator("[data-testid='card-accordion-item-button']")
-            if await card_accordion.count() > 0:
-                stripe_loaded = True
-                break
+    except Exception:
+        pass
 
-        if not stripe_loaded:
-            # Check if card fields are directly on page
-            card_num = page.locator("input[name='cardNumber']")
-            if await card_num.count() > 0:
-                stripe_loaded = True
+    # Card number (type with delay for Stripe validation)
+    card_input = page.locator("input[name='cardNumber']")
+    if await card_input.count() > 0:
+        await card_input.click()
+        await card_input.type(card, delay=50)
+        await asyncio.sleep(0.5)
 
-        if not stripe_loaded:
-            logger.error("Billing: Stripe Checkout did not load")
-            await page.screenshot(path="/tmp/billing_stripe_fail.png")
-            await browser.close()
-            await pw.stop()
-            return {"status": "error", "error": "Stripe Checkout not loaded"}
+    # Expiry
+    expiry_input = page.locator("input[name='cardExpiry']")
+    if await expiry_input.count() > 0:
+        await expiry_input.click()
+        await expiry_input.type("12/28", delay=50)
+        await asyncio.sleep(0.5)
 
-        await asyncio.sleep(3)
+    # CVC
+    cvc_input = page.locator("input[name='cardCvc']")
+    if await cvc_input.count() > 0:
+        await cvc_input.click()
+        await cvc_input.type("312", delay=50)
+        await asyncio.sleep(0.5)
 
-        # Step 7: Fill card details
-        logger.info("Billing: Filling card details...")
-        card = random.choice(CARD_NUMBERS)
-        name = f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
+    # Cardholder name
+    name_input = page.locator("input[name='billingName']")
+    if await name_input.count() > 0:
+        await name_input.click()
+        await name_input.type(name, delay=30)
+        await asyncio.sleep(0.5)
 
-        # Expand card accordion if needed
+    # ── Step 6: Fill address ───────────────────────────────────────────────
+    logger.info(f"Billing: Filling address {street}, {plz} Berlin")
+
+    # Click "Adresse manuell eingeben" to reveal address fields
+    try:
+        manual_addr = page.locator("text=Adresse manuell eingeben")
+        if await manual_addr.count() > 0 and await manual_addr.first.is_visible(timeout=2000):
+            await manual_addr.first.click()
+            await asyncio.sleep(1)
+    except Exception:
+        pass
+
+    # Also try English variant
+    try:
+        manual_addr_en = page.locator("text=Enter address manually")
+        if await manual_addr_en.count() > 0 and await manual_addr_en.first.is_visible(timeout=1000):
+            await manual_addr_en.first.click()
+            await asyncio.sleep(1)
+    except Exception:
+        pass
+
+    addr_input = page.locator("input[name='billingAddressLine1']")
+    if await addr_input.count() > 0:
+        await addr_input.click()
+        await addr_input.type(street, delay=30)
+        await asyncio.sleep(0.3)
+
+    plz_input = page.locator("input[name='billingPostalCode']")
+    if await plz_input.count() > 0:
+        await plz_input.click()
+        await plz_input.type(plz, delay=30)
+        await asyncio.sleep(0.3)
+
+    city_input = page.locator("input[name='billingLocality']")
+    if await city_input.count() > 0:
+        await city_input.click()
+        await city_input.type("Berlin", delay=30)
+        await asyncio.sleep(0.3)
+
+    # ── Step 7: Click Save ─────────────────────────────────────────────────
+    logger.info("Billing: Clicking Save...")
+    save_btn = page.locator(
+        "button:has-text('Speichern'), button:has-text('Save'), "
+        "button:has-text('Save card'), button:has-text('speichern')"
+    )
+    if await save_btn.count() == 0:
         try:
-            accordion = page.locator("[data-testid='card-accordion-item-button']")
-            if await accordion.count() > 0:
-                await accordion.first.click()
-                await asyncio.sleep(1)
+            save_btn = page.get_by_role("button", name=re.compile(r"speichern|save", re.IGNORECASE))
         except Exception:
             pass
 
-        # Fill card number (type with delay for Stripe)
-        card_input = page.locator("input[name='cardNumber']")
-        if await card_input.count() > 0:
-            await card_input.click()
-            await card_input.type(card, delay=50)
-            await asyncio.sleep(0.5)
+    if save_btn and (await save_btn.count() if hasattr(save_btn, 'count') else 0) > 0:
+        await save_btn.first.click()
+    else:
+        logger.warning("Billing: Save button not found — trying Enter key")
+        await page.keyboard.press("Enter")
 
-        # Fill expiry
-        expiry_input = page.locator("input[name='cardExpiry']")
-        if await expiry_input.count() > 0:
-            await expiry_input.click()
-            await expiry_input.type("12/28", delay=50)
-            await asyncio.sleep(0.5)
+    await asyncio.sleep(5)
 
-        # Fill CVC
-        cvc_input = page.locator("input[name='cardCvc']")
-        if await cvc_input.count() > 0:
-            await cvc_input.click()
-            await cvc_input.type("312", delay=50)
-            await asyncio.sleep(0.5)
+    # ── Step 8: hCaptcha polling (100×3s = 5 min) ──────────────────────────
+    hcaptcha = page.locator("iframe[src*='hcaptcha'], [class*='hcaptcha'], #hcaptcha")
+    hcaptcha_present = False
+    try:
+        hcaptcha_present = await hcaptcha.count() > 0
+    except Exception:
+        pass
 
-        # Fill name
-        name_input = page.locator("input[name='billingName']")
-        if await name_input.count() > 0:
-            await name_input.click()
-            await name_input.type(name, delay=30)
-            await asyncio.sleep(0.5)
+    if hcaptcha_present:
+        logger.warning("Billing: hCaptcha detected — solve it in the browser window!")
+        logger.warning("Billing: Polling every 3s for up to 5 minutes (100 checks)...")
+        await page.screenshot(path="/tmp/billing_hcaptcha.png")
 
-        # Step 8: Fill address
-        logger.info("Billing: Filling address...")
-        street = random.choice(STREETS)
-        plz = random.choice(PLZ_LIST)
-
-        # Click "Adresse manuell eingeben" if visible
-        try:
-            manual_addr = page.locator("text=Adresse manuell eingeben")
-            if await manual_addr.count() > 0 and await manual_addr.first.is_visible(timeout=2000):
-                await manual_addr.first.click()
-                await asyncio.sleep(1)
-        except Exception:
-            pass
-
-        addr_input = page.locator("input[name='billingAddressLine1']")
-        if await addr_input.count() > 0:
-            await addr_input.click()
-            await addr_input.type(street, delay=30)
-            await asyncio.sleep(0.3)
-
-        plz_input = page.locator("input[name='billingPostalCode']")
-        if await plz_input.count() > 0:
-            await plz_input.click()
-            await plz_input.type(plz, delay=30)
-            await asyncio.sleep(0.3)
-
-        city_input = page.locator("input[name='billingLocality']")
-        if await city_input.count() > 0:
-            await city_input.click()
-            await city_input.type("Berlin", delay=30)
-            await asyncio.sleep(0.3)
-
-        # Step 9: Save
-        logger.info("Billing: Clicking Save...")
-        save_btn = page.locator("button:has-text('Speichern'), button:has-text('Save')")
-        if await save_btn.count() > 0:
-            await save_btn.first.click()
-        else:
+        for poll_i in range(100):
+            await asyncio.sleep(3)
             try:
-                save_btn2 = page.get_by_role("button", name=re.compile(r"speichern|save", re.IGNORECASE))
-                if await save_btn2.count() > 0:
-                    await save_btn2.first.click()
-            except Exception:
-                pass
-
-        await asyncio.sleep(5)
-
-        # Step 10: Check for hCaptcha
-        hcaptcha = page.locator("iframe[src*='hcaptcha'], [class*='hcaptcha']")
-        if await hcaptcha.count() > 0:
-            logger.warning("Billing: hCaptcha detected — waiting up to 5 min for manual solve...")
-            await page.screenshot(path="/tmp/billing_hcaptcha.png")
-            for _ in range(60):  # 5 min = 60 × 5s
-                await asyncio.sleep(5)
-                hcaptcha = page.locator("iframe[src*='hcaptcha'], [class*='hcaptcha']")
-                if await hcaptcha.count() == 0:
-                    logger.info("Billing: hCaptcha solved!")
+                hc = page.locator("iframe[src*='hcaptcha'], [class*='hcaptcha'], #hcaptcha")
+                count = await hc.count()
+                if count == 0:
+                    logger.info(f"Billing: hCaptcha solved after {(poll_i+1)*3}s!")
                     break
-            else:
-                logger.error("Billing: hCaptcha timeout")
-                await browser.close()
-                await pw.stop()
-                return {"status": "error", "error": "hCaptcha timeout"}
-
-        # Verify payment method added
-        await asyncio.sleep(3)
-        body_text = await page.inner_text("body")
-        if "payment method" in body_text.lower():
-            logger.info("Billing: Payment method added successfully")
-            result = {"status": "success", "message": "Payment method added"}
-        else:
-            logger.warning("Billing: Uncertain if payment was added")
-            result = {"status": "uncertain", "message": "Check manually"}
-
-        await browser.close()
-        await pw.stop()
-        return result
-
-    except Exception as e:
-        logger.error(f"Billing error: {e}")
-        return {"status": "error", "error": str(e)}
-    finally:
-        if chrome_proc:
-            try:
-                chrome_proc.terminate()
-                chrome_proc.wait(timeout=5)
+                # Also check if page navigated away (payment success)
+                url = page.url
+                if "billing" in url.lower() and "checkout" not in url.lower():
+                    # Might have completed — check body text
+                    txt = await page.inner_text("body")
+                    if "payment method" in txt.lower() and "add" not in txt.lower():
+                        logger.info(f"Billing: Payment completed after {(poll_i+1)*3}s (page changed)")
+                        break
             except Exception:
                 pass
+
+            if poll_i % 10 == 0:
+                logger.info(f"Billing: Still waiting for hCaptcha... ({poll_i+1}/100, {(poll_i+1)*3}s elapsed)")
+        else:
+            logger.error("Billing: hCaptcha timeout after 5 minutes")
+            await page.screenshot(path="/tmp/billing_hcaptcha_timeout.png")
+            return {"status": "hcaptcha_timeout", "error": "hCaptcha not solved within 5 minutes"}
+
+    # ── Step 9: Verify payment method added ─────────────────────────────────
+    await asyncio.sleep(3)
+    body_text = await page.inner_text("body")
+    if "payment method" in body_text.lower():
+        logger.info("Billing: Payment method added successfully!")
+        return {"status": "success", "message": "Payment method added"}
+
+    logger.warning("Billing: Uncertain if payment was added — check browser")
+    await page.screenshot(path="/tmp/billing_uncertain.png")
+    return {"status": "uncertain", "message": "Check browser for result"}
 
 

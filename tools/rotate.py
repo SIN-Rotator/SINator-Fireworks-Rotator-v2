@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-SINator - Rotation Tool V19 (SIN-Browser-Tools, 2026-06-01)
+SINator - Rotation Tool V20 (Billing Integration)
 
-Fireworks flow via SIN-Browser-Tools. Bot Chrome bleibt GEÖFFNET bis API Key.
-GMX flow in User Chrome (Profile 73, CDP).
-OTP polling via User Chrome (GMX session).
+Flow: GMX Login → Alias Rotation → Fireworks Signup → OTP → Verify →
+      Login → API Key → Billing (hCaptcha poll 100×3s) → Save to Pool
+
+Bot Chrome stays open through ALL steps including billing.
+Billing uses the same Bot Chrome session (no separate Chrome CDP).
 """
 import sys
 import os
@@ -205,7 +207,7 @@ async def main():
         logger.info("=== Launching Bot Chrome via SIN-Browser-Tools ===")
         from fireworks_service import launch, cleanup_bot, signup_fireworks
         from fireworks_service import verify_account, create_api_key, login_fireworks
-        from fireworks_service import check_credits, add_billing
+        from fireworks_service import add_billing
 
         launch_result = await launch()
         fw_mgr = launch_result.get("browser_manager")
@@ -297,24 +299,7 @@ async def main():
             logger.error(f"Login failed after verify: {login_result.get('error')}")
             return
 
-        # Step 4.5: Credit check + billing fallback
-        logger.info("=== Checking Credits ===")
-        credit_result = await check_credits()
-        credits = credit_result.get("credits", 0.0)
-        has_credits = credit_result.get("has_credits", False)
-        logger.info(f"Credits: ${credits:.2f} (has_credits={has_credits})")
-
-        if not has_credits:
-            logger.info("No free credits — attempting billing step via Chrome CDP...")
-            billing_result = await add_billing(alias, args.password)
-            billing_status = billing_result.get("status")
-            logger.info(f"Billing result: {billing_status} — {billing_result.get('message', billing_result.get('error', ''))}")
-            if billing_status == "hcaptcha_pending":
-                logger.warning("hCaptcha detected — manual intervention may be needed")
-        else:
-            logger.info(f"Free credits available (${credits:.2f}) — skipping billing")
-
-        # Step 5: API Key
+        # Step 5: API Key (BEFORE billing — key must exist first)
         logger.info("=== API Key ===")
         key_name = alias.split("@")[0].split("-")[0] if alias else "sinator-key"
         api_result = await create_api_key(key_name=key_name)
@@ -326,7 +311,21 @@ async def main():
 
         logger.info(f"API Key: {api_key}")
 
-        # Step 6: Save to pool
+        # Step 6: Billing (AFTER API key — adds $6 free credits)
+        logger.info("=== Billing (adds free credits) ===")
+        billing_result = await add_billing()
+        billing_status = billing_result.get("status")
+        billing_msg = billing_result.get("message", billing_result.get("error", ""))
+        logger.info(f"Billing result: {billing_status} — {billing_msg}")
+
+        if billing_status == "hcaptcha_timeout":
+            logger.warning("hCaptcha was NOT solved within 5 min — key saved without credits")
+        elif billing_status == "success":
+            logger.info("Billing complete — key has $6 free credits!")
+        else:
+            logger.warning(f"Billing uncertain: {billing_msg}")
+
+        # Step 7: Save to pool
         if args.save:
             try:
                 from pool_manager import PoolManager
