@@ -1,0 +1,18 @@
+services:
+  rotator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: sinator-rotator
+    volumes:
+      # Pool file from host (read/write)
+      - ../data:/app/data
+    environment:
+      - LOG_LEVEL=INFO
+      - SIN_DOCKER=1
+    network_mode: host
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    restart: "no"
